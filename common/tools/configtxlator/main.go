@@ -29,6 +29,7 @@ import (
 	"github.com/hyperledger/fabric/common/tools/configtxlator/update"
 	"github.com/hyperledger/fabric/common/tools/protolator"
 	cb "github.com/hyperledger/fabric/protos/common"
+	_ "github.com/hyperledger/fabric/protos/orderer/etcdraft"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
