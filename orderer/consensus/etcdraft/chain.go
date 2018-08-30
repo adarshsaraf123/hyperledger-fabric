@@ -8,10 +8,12 @@ package etcdraft
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/orderer/consensus"
 	"github.com/hyperledger/fabric/protos/common"
@@ -21,6 +23,7 @@ import (
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	// "github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
 )
 
@@ -121,8 +124,50 @@ func (c *Chain) Order(env *common.Envelope, configSeq uint64) error {
 
 // Configure submits config type transactins
 func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
-	c.logger.Panicf("Configure not implemented yet")
-	return nil
+	// validate the config update for being of Type A or Type B as described in the design doc.
+	if err := c.checkConfigUpdateValidity(env); err != nil {
+		return err
+	}
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Content: env}, 0)
+	// c.logger.Panicf("Configure not implemented yet")
+}
+
+// validate the config update for being of Type A or Type B as described in the design doc.
+func (c *Chain) checkConfigUpdateValidity(ctx *common.Envelope) error {
+	payload, _ := utils.UnmarshalPayload(ctx.Payload)
+	chdr, _ := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+
+	switch chdr.Type {
+	case int32(common.HeaderType_ORDERER_TRANSACTION):
+		return fmt.Errorf("channel creation requests not yet supported")
+	case int32(common.HeaderType_CONFIG):
+		configEnv, _ := configtx.UnmarshalConfigEnvelope(payload.Data)
+		configUpdateEnv, _ := envelopeToConfigUpdate(configEnv.LastUpdate)
+		configUpdate, _ := configtx.UnmarshalConfigUpdate(configUpdateEnv.ConfigUpdate)
+
+		// ignoring the read set for now
+		// check only if the ConsensusType is updated in the write set
+		// c.logger.Info(configUpdate.WriteSet)
+		if ordererConfigGroup, ok := configUpdate.WriteSet.Groups["Orderer"]; ok {
+			if _, ok := ordererConfigGroup.Values["ConsensusType"]; ok {
+				return fmt.Errorf("updates to ConsensusType not supported currently")
+			}
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("config transaction has unknown header type: %v", chdr.Type)
+	}
+}
+
+// copied from common/configtx/update.go
+func envelopeToConfigUpdate(configtx *common.Envelope) (*common.ConfigUpdateEnvelope, error) {
+	configUpdateEnv := &common.ConfigUpdateEnvelope{}
+	_, err := utils.UnmarshalEnvelopeOfType(configtx, common.HeaderType_CONFIG_UPDATE, configUpdateEnv)
+	if err != nil {
+		return nil, err
+	}
+	return configUpdateEnv, nil
 }
 
 // WaitReady is currently no-op
@@ -244,9 +289,11 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 		select {
 		case block := <-c.commitC:
 			if utils.IsConfigBlock(block) {
-				c.logger.Panicf("Config block is not supported yet")
+				c.support.WriteConfigBlock(block, nil)
+				// c.logger.Panicf("Config block is not supported yet")
+			} else {
+				c.support.WriteBlock(block, nil)
 			}
-			c.support.WriteBlock(block, nil)
 
 		case <-c.doneC:
 			return nil

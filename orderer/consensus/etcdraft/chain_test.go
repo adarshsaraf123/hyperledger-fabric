@@ -14,6 +14,7 @@ import (
 	consensusmocks "github.com/hyperledger/fabric/orderer/consensus/mocks"
 	mockblockcutter "github.com/hyperledger/fabric/orderer/mocks/common/blockcutter"
 	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protos/utils"
 
 	"code.cloudfoundry.org/clock/fakeclock"
@@ -28,12 +29,14 @@ var _ = Describe("Chain", func() {
 		m           *common.Envelope
 		normalBlock *common.Block
 		interval    time.Duration
+		channelID   string
 	)
 
 	BeforeEach(func() {
+		channelID = "test-chain"
 		m = &common.Envelope{
 			Payload: utils.MarshalOrPanic(&common.Payload{
-				Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: "foo"})},
+				Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: channelID})},
 				Data:   []byte("TEST_MESSAGE"),
 			}),
 		}
@@ -84,7 +87,7 @@ var _ = Describe("Chain", func() {
 				Storage:         storage,
 			}
 			support = &consensusmocks.FakeConsenterSupport{}
-			support.ChainIDReturns("test")
+			support.ChainIDReturns(channelID)
 			support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: time.Hour})
 			cutter = mockblockcutter.NewReceiver()
 			support.BlockCutterReturns(cutter)
@@ -154,6 +157,184 @@ var _ = Describe("Chain", func() {
 				clock.WaitForNWatchersAndIncrement(timeout, 2)
 				Eventually(support.WriteBlockCallCount).Should(Equal(2))
 			})
+
+			FDescribe("Config updates", func() {
+				var (
+					configEnv *common.Envelope
+					configSeq uint64
+				)
+
+				// sets the configEnv var declared above
+				createConfigEnvFromConfigUpdateEnv := func(chainID string, headerType common.HeaderType, configUpdateEnv *common.ConfigUpdateEnvelope) {
+					// TODO: use the config utility functions imported at end of file for doing the same
+					configEnv = &common.Envelope{
+						Payload: utils.MarshalOrPanic(&common.Payload{
+							Header: &common.Header{
+								ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+									Type:      int32(headerType),
+									ChannelId: chainID,
+								}),
+							},
+							Data: utils.MarshalOrPanic(&common.ConfigEnvelope{
+								LastUpdate: &common.Envelope{
+									Payload: utils.MarshalOrPanic(&common.Payload{
+										Header: &common.Header{
+											ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+												Type:      int32(common.HeaderType_CONFIG_UPDATE),
+												ChannelId: chainID,
+											}),
+										},
+										Data: utils.MarshalOrPanic(configUpdateEnv),
+									}), // common.Payload
+								}, // LastUpdate
+							}),
+						}),
+					}
+				}
+
+				createConfigUpdateEnvFromOrdererValues := func(chainID string, values map[string]*common.ConfigValue) *common.ConfigUpdateEnvelope {
+					return &common.ConfigUpdateEnvelope{
+						ConfigUpdate: utils.MarshalOrPanic(&common.ConfigUpdate{
+							ChannelId: chainID,
+							ReadSet:   &common.ConfigGroup{},
+							WriteSet: &common.ConfigGroup{
+								Groups: map[string]*common.ConfigGroup{
+									"Orderer": &common.ConfigGroup{
+										Values: values,
+									},
+								},
+							}, // WriteSet
+						}),
+					}
+				}
+
+				Context("when a type A config update comes", func() {
+
+					Context("for existing channel", func() {
+
+						// use to prepare the Orderer Values
+						BeforeEach(func() {
+							values := map[string]*common.ConfigValue{
+								"BatchTimeout": &common.ConfigValue{
+									Version: 1,
+									Value: utils.MarshalOrPanic(&orderer.BatchTimeout{
+										Timeout: "3ms",
+									}),
+								},
+							}
+							createConfigEnvFromConfigUpdateEnv(channelID,
+								common.HeaderType_CONFIG,
+								createConfigUpdateEnvFromOrdererValues(channelID, values),
+							)
+							configSeq = 1
+						}) // BeforeEach block
+
+						It("should not throw any error", func() {
+							err := chain.Configure(configEnv, configSeq)
+							Expect(err).NotTo(HaveOccurred())
+						})
+					})
+
+					Context("for creating a new channel", func() {
+
+						// use to prepare the Orderer Values
+						BeforeEach(func() {
+							chainID := "mychannel"
+							createConfigEnvFromConfigUpdateEnv(chainID,
+								common.HeaderType_ORDERER_TRANSACTION,
+								&common.ConfigUpdateEnvelope{})
+							configSeq = 1
+						}) // BeforeEach block
+
+						It("should panic", func() {
+							err := chain.Configure(configEnv, configSeq)
+							Expect(err).To(MatchError("channel creation requests not yet supported"))
+						})
+					})
+				}) // Context block for type A config
+
+				Context("when a type B config update comes", func() {
+
+					By("for an existing channel")
+
+					// use to prepare the Orderer Values
+					BeforeEach(func() {
+						values := map[string]*common.ConfigValue{
+							"ConsensusType": &common.ConfigValue{
+								Version: 1,
+								Value: utils.MarshalOrPanic(&orderer.ConsensusType{
+									Metadata: []byte("new consenter"),
+								}),
+							},
+						}
+						createConfigEnvFromConfigUpdateEnv(channelID,
+							common.HeaderType_CONFIG,
+							createConfigUpdateEnvFromOrdererValues(channelID, values))
+						configSeq = 1
+					}) // BeforeEach block
+
+					It("should throw an error", func() {
+						err := chain.Configure(configEnv, configSeq)
+						Expect(err).To(MatchError("updates to ConsensusType not supported currently"))
+					})
+
+				})
+			})
 		})
 	})
 })
+
+// ------------ Copied from common/configtx/validator_test.go ---------------
+
+type configPair struct {
+	key   string
+	value *common.ConfigValue
+}
+
+func makeConfigPair(id, modificationPolicy string, lastModified uint64, data []byte) *configPair {
+	return &configPair{
+		key: id,
+		value: &common.ConfigValue{
+			ModPolicy: modificationPolicy,
+			Version:   lastModified,
+			Value:     data,
+		},
+	}
+}
+
+func makeConfig(configPairs ...*configPair) *common.Config {
+	channelGroup := common.NewConfigGroup()
+	for _, pair := range configPairs {
+		channelGroup.Values[pair.key] = pair.value
+	}
+
+	return &common.Config{
+		ChannelGroup: channelGroup,
+	}
+}
+
+func makeConfigSet(configPairs ...*configPair) *common.ConfigGroup {
+	result := common.NewConfigGroup()
+	for _, pair := range configPairs {
+		result.Values[pair.key] = pair.value
+	}
+	return result
+}
+func makeConfigUpdateEnvelope(chainID string, readSet, writeSet *common.ConfigGroup) *common.Envelope {
+	return &common.Envelope{
+		Payload: utils.MarshalOrPanic(&common.Payload{
+			Header: &common.Header{
+				ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+					Type: int32(common.HeaderType_CONFIG_UPDATE),
+				}),
+			},
+			Data: utils.MarshalOrPanic(&common.ConfigUpdateEnvelope{
+				ConfigUpdate: utils.MarshalOrPanic(&common.ConfigUpdate{
+					ChannelId: chainID,
+					ReadSet:   readSet,
+					WriteSet:  writeSet,
+				}),
+			}),
+		}),
+	}
+}

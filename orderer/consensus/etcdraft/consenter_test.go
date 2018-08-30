@@ -54,7 +54,6 @@ var _ = Describe("Consenter", func() {
 				MaxSizePerMsg:   1024 * 1024,
 				MaxInflightMsgs: 256,
 			},
-			Cert: []byte("cert.orderer0.org0"),
 		}
 
 		chain, err := consenter.HandleChain(support, nil)
