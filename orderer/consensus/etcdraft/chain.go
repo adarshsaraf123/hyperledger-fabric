@@ -18,6 +18,7 @@ import (
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/consensus"
@@ -133,8 +134,54 @@ func (c *Chain) Order(env *common.Envelope, configSeq uint64) error {
 
 // Configure submits config type transactins
 func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
-	c.logger.Panicf("Configure not implemented yet")
-	return nil
+	// validate the config update for being of Type A or Type B as described in the design doc.
+	if err := c.checkConfigUpdateValidity(env); err != nil {
+		return err
+	}
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Content: env}, 0)
+}
+
+// validate the config update for being of Type A or Type B as described in the design doc.
+func (c *Chain) checkConfigUpdateValidity(ctx *common.Envelope) error {
+	var err error
+	payload, err := utils.UnmarshalPayload(ctx.Payload)
+	if err != nil {
+		return err
+	}
+	chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	if err != nil {
+		return err
+	}
+
+	switch chdr.Type {
+	case int32(common.HeaderType_ORDERER_TRANSACTION):
+		return errors.Errorf("channel creation requests not supported yet")
+	case int32(common.HeaderType_CONFIG):
+		configEnv, err := configtx.UnmarshalConfigEnvelope(payload.Data)
+		if err != nil {
+			return err
+		}
+		configUpdateEnv, err := utils.EnvelopeToConfigUpdate(configEnv.LastUpdate)
+		if err != nil {
+			return err
+		}
+		configUpdate, err := configtx.UnmarshalConfigUpdate(configUpdateEnv.ConfigUpdate)
+		if err != nil {
+			return err
+		}
+
+		// ignoring the read set for now
+		// check only if the ConsensusType is updated in the write set
+		if ordererConfigGroup, ok := configUpdate.WriteSet.Groups["Orderer"]; ok {
+			if _, ok := ordererConfigGroup.Values["ConsensusType"]; ok {
+				return errors.Errorf("updates to ConsensusType not supported currently")
+			}
+		}
+		return nil
+
+	default:
+		return errors.Errorf("config transaction has unknown header type")
+	}
 }
 
 // WaitReady is currently no-op
@@ -188,6 +235,8 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 }
 
 func (c *Chain) serveRequest() {
+	var err error
+
 	ticking := false
 	timer := c.clock.NewTimer(time.Second)
 	// we need a stopped timer rather than nil,
@@ -213,25 +262,39 @@ func (c *Chain) serveRequest() {
 	}
 
 	for {
-		seq := c.support.Sequence()
 
 		select {
 		case msg := <-c.submitC:
-			if c.isConfig(msg.Content) {
-				c.logger.Panicf("Processing config envelope is not implemented yet")
-			}
+			var batches [][]*common.Envelope
+			seq := c.support.Sequence()
 
-			if msg.LastValidationSeq < seq {
-				if _, err := c.support.ProcessNormalMsg(msg.Content); err != nil {
-					c.logger.Warningf("Discarding bad normal message: %s", err)
+			if c.isConfig(msg.Content) {
+				// ConfigMsg
+				if msg.LastValidationSeq < seq {
+					fmt.Println("require revalidation")
+					msg.Content, _, err = c.support.ProcessConfigMsg(msg.Content)
+					if err != nil {
+						c.logger.Warningf("Discarding bad config message: %s", err)
+						continue
+					}
+				}
+				batch := c.support.BlockCutter().Cut()
+				if len(batch) != 0 {
+					batches = append(batches, batch)
+				}
+				batches = append(batches, []*common.Envelope{msg.Content})
+			} else {
+				if msg.LastValidationSeq < seq {
+					if _, err := c.support.ProcessNormalMsg(msg.Content); err != nil {
+						c.logger.Warningf("Discarding bad normal message: %s", err)
+						continue
+					}
+				}
+				batches, _ = c.support.BlockCutter().Ordered(msg.Content)
+				if len(batches) == 0 {
+					start()
 					continue
 				}
-			}
-
-			batches, _ := c.support.BlockCutter().Ordered(msg.Content)
-			if len(batches) == 0 {
-				start()
-				continue
 			}
 
 			stop()
@@ -272,9 +335,10 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 		select {
 		case block := <-c.commitC:
 			if utils.IsConfigBlock(block) {
-				c.logger.Panicf("Config block is not supported yet")
+				c.support.WriteConfigBlock(block, nil)
+			} else {
+				c.support.WriteBlock(block, nil)
 			}
-			c.support.WriteBlock(block, nil)
 
 		case <-c.doneC:
 			return nil
