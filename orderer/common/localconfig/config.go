@@ -33,6 +33,7 @@ type TopLevel struct {
 	FileLedger FileLedger
 	RAMLedger  RAMLedger
 	Kafka      Kafka
+	EtcdRaft   EtcdRaft
 	Debug      Debug
 }
 
@@ -161,6 +162,14 @@ type Topic struct {
 	ReplicationFactor int16
 }
 
+type EtcdRaft struct {
+	TickInterval    time.Duration
+	ElectionTick    int
+	HeartbeatTick   int
+	MaxSizePerMsg   uint64
+	MaxInflightMsgs int
+}
+
 // Debug contains configuration for the orderer's debug parameters.
 type Debug struct {
 	BroadcastTraceDir string
@@ -228,6 +237,13 @@ var Defaults = TopLevel{
 		Topic: Topic{
 			ReplicationFactor: 3,
 		},
+	},
+	EtcdRaft: EtcdRaft{
+		TickInterval:    100 * time.Millisecond,
+		ElectionTick:    10,
+		HeartbeatTick:   1,
+		MaxSizePerMsg:   1024 * 1024,
+		MaxInflightMsgs: 256,
 	},
 	Debug: Debug{
 		BroadcastTraceDir: "",
