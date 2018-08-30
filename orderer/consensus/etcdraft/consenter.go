@@ -24,7 +24,6 @@ import (
 
 type Consenter struct {
 	Config localconfig.EtcdRaft
-	Cert   []byte
 }
 
 func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *common.Metadata) (consensus.Chain, error) {
@@ -35,7 +34,7 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 
 	var id uint64
 	for i, cst := range m.Consenters {
-		if bytes.Equal(c.Cert, cst.ServerTlsCert) {
+		if bytes.Equal(c.Config.ServerTlsCert, cst.ServerTlsCert) {
 			id = uint64(i + 1)
 			break
 		}

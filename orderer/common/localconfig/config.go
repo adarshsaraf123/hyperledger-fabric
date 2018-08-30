@@ -5,6 +5,7 @@ package localconfig
 
 import (
 	"fmt"
+	"io/ioutil"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	bccsp "github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/viperutil"
+	cf "github.com/hyperledger/fabric/core/config"
 	coreconfig "github.com/hyperledger/fabric/core/config"
 
 	"github.com/Shopify/sarama"
@@ -162,12 +164,15 @@ type Topic struct {
 	ReplicationFactor int16
 }
 
+// EtcdRaft contains configuration for an etcdraft consenter.
 type EtcdRaft struct {
 	TickInterval    time.Duration
 	ElectionTick    int
 	HeartbeatTick   int
 	MaxSizePerMsg   uint64
 	MaxInflightMsgs int
+	ClientTlsCert   []byte
+	ServerTlsCert   []byte
 }
 
 // Debug contains configuration for the orderer's debug parameters.
@@ -244,6 +249,8 @@ var Defaults = TopLevel{
 		HeartbeatTick:   1,
 		MaxSizePerMsg:   1024 * 1024,
 		MaxInflightMsgs: 256,
+		ClientTlsCert:   nil, // if the consensus type is etcdraft this must always be specified
+		ServerTlsCert:   nil, // if the consensus type is etcdraft this must always be specified
 	},
 	Debug: Debug{
 		BroadcastTraceDir: "",
@@ -285,6 +292,7 @@ func (c *TopLevel) completeInitialization(configDir string) {
 		coreconfig.TranslatePathInPlace(configDir, &c.General.LocalMSPDir)
 	}()
 
+loop:
 	for {
 		switch {
 		case c.General.LedgerType == "":
@@ -390,9 +398,55 @@ func (c *TopLevel) completeInitialization(configDir string) {
 			logger.Infof("Kafka.Version unset, setting to %v", Defaults.Kafka.Version)
 			c.Kafka.Version = Defaults.Kafka.Version
 
+		case c.EtcdRaft.TickInterval == 0:
+			logger.Infof("EtcdRaft.TickInterval unset, setting to %v", Defaults.EtcdRaft.TickInterval)
+			c.EtcdRaft.TickInterval = Defaults.EtcdRaft.TickInterval
+
+		case c.EtcdRaft.ElectionTick == 0:
+			logger.Infof("EtcdRaft.ElectionTick unset, setting to %v", Defaults.EtcdRaft.ElectionTick)
+			c.EtcdRaft.ElectionTick = Defaults.EtcdRaft.ElectionTick
+
+		case c.EtcdRaft.HeartbeatTick == 0:
+			logger.Infof("EtcdRaft.HeartbeatTick unset, setting to %v", Defaults.EtcdRaft.HeartbeatTick)
+			c.EtcdRaft.HeartbeatTick = Defaults.EtcdRaft.HeartbeatTick
+
+		case c.EtcdRaft.MaxSizePerMsg == 0:
+			logger.Infof("EtcdRaft.MaxSizePerMsg unset, setting to %v", Defaults.EtcdRaft.MaxSizePerMsg)
+			c.EtcdRaft.MaxSizePerMsg = Defaults.EtcdRaft.MaxSizePerMsg
+
+		case c.EtcdRaft.MaxInflightMsgs == 0:
+			logger.Infof("EtcdRaft.MaxInflightMsgs unset, setting to %v", Defaults.EtcdRaft.MaxInflightMsgs)
+			c.EtcdRaft.MaxInflightMsgs = Defaults.EtcdRaft.MaxInflightMsgs
+
+		case c.EtcdRaft.ClientTlsCert == nil:
+			logger.Infof("EtcdRaft.ClientTlsCert unset, will panic if the consensus type is etcdraft")
+
+		case c.EtcdRaft.ServerTlsCert == nil:
+			logger.Infof("EtcdRaft.ServerTlsCert unset, will panic if the consensus type is etcdraft")
+
 		default:
-			return
+			break loop
 		}
+	}
+
+	// if the TLS certs for etcdraft are specified then load the certs.
+	if c.EtcdRaft.ClientTlsCert != nil {
+		clientCertPath := string(c.EtcdRaft.ClientTlsCert)
+		cf.TranslatePathInPlace(configDir, &clientCertPath)
+		clientCert, err := ioutil.ReadFile(clientCertPath)
+		if err != nil {
+			panic(fmt.Errorf("cannot load client cert for consenter"))
+		}
+		c.EtcdRaft.ClientTlsCert = clientCert
+	}
+	if c.EtcdRaft.ServerTlsCert != nil {
+		serverCertPath := string(c.EtcdRaft.ServerTlsCert)
+		cf.TranslatePathInPlace(configDir, &serverCertPath)
+		serverCert, err := ioutil.ReadFile(serverCertPath)
+		if err != nil {
+			panic(fmt.Errorf("cannot load server cert for consenter"))
+		}
+		c.EtcdRaft.ServerTlsCert = serverCert
 	}
 }
 

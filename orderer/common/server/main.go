@@ -27,6 +27,7 @@ import (
 	"github.com/hyperledger/fabric/orderer/common/metadata"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"github.com/hyperledger/fabric/orderer/consensus"
+	"github.com/hyperledger/fabric/orderer/consensus/etcdraft"
 	"github.com/hyperledger/fabric/orderer/consensus/kafka"
 	"github.com/hyperledger/fabric/orderer/consensus/solo"
 	cb "github.com/hyperledger/fabric/protos/common"
@@ -254,6 +255,7 @@ func initializeMultichannelRegistrar(conf *localconfig.TopLevel, signer crypto.L
 	consenters := make(map[string]consensus.Consenter)
 	consenters["solo"] = solo.New()
 	consenters["kafka"] = kafka.New(conf.Kafka)
+	consenters["etcdraft"] = &etcdraft.Consenter{Config: conf.EtcdRaft}
 
 	return multichannel.NewRegistrar(lf, consenters, signer, callbacks...)
 }
