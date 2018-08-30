@@ -277,3 +277,26 @@ Debug:
     # DeliverTraceDir when set will cause each request to the Deliver service
     # for this orderer to be written to a file in this directory
     DeliverTraceDir:
+
+################################################################################
+#
+#   SECTION: EtcdRaft
+#
+#   - This section applies to the configuration of the EtcdRaft-based orderer.
+#
+################################################################################
+EtcdRaft:
+
+    TickInterval: 100ms
+
+    ElectionTick: 10
+
+    HeartbeatTick: 1
+
+    MaxSizePerMsg: 1048576
+
+    MaxInflightMsgs: 256
+
+    ClientTlsCert: etcdraft/tls-client-1.pem
+
+    ServerTlsCert: etcdraft/tls-server-1.pem
