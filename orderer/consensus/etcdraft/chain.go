@@ -171,12 +171,7 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 }
 
 func (c *Chain) serveRequest() {
-	clocking := false
-	timer := c.clock.NewTimer(c.support.SharedConfig().BatchTimeout())
-	if !timer.Stop() {
-		// drain the channel. see godoc of time#Timer.Stop
-		<-timer.C()
-	}
+	timer := newTimer(c.clock)
 
 	for {
 		seq := c.support.Sequence()
@@ -196,24 +191,18 @@ func (c *Chain) serveRequest() {
 
 			batches, _ := c.support.BlockCutter().Ordered(msg.Content)
 			if len(batches) == 0 {
-				if !clocking {
-					clocking = true
-					timer.Reset(c.support.SharedConfig().BatchTimeout())
-				}
+				timer.start(c.support.SharedConfig().BatchTimeout())
 				continue
 			}
 
-			if !timer.Stop() && clocking {
-				<-timer.C()
-			}
-			clocking = false
+			timer.stop()
 
 			if err := c.commitBatches(batches...); err != nil {
 				c.logger.Errorf("Failed to commit block: %s", err)
 			}
 
-		case <-timer.C():
-			clocking = false
+		case <-timer.c():
+			timer.reset()
 
 			batch := c.support.BlockCutter().Cut()
 			if len(batch) == 0 {
