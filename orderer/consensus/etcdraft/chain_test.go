@@ -20,6 +20,7 @@ import (
 	"github.com/coreos/etcd/raft"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -155,6 +156,178 @@ var _ = Describe("Chain", func() {
 
 				clock.WaitForNWatchersAndIncrement(timeout, 2)
 				Eventually(support.WriteBlockCallCount).Should(Equal(2))
+			})
+
+			It("does not reset timer for every envelope", func() {
+				close(cutter.Block)
+				support.CreateNextBlockReturns(normalBlock)
+
+				timeout := time.Second
+				support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+
+				err := chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(1))
+
+				clock.WaitForNWatchersAndIncrement(timeout/2, 2)
+
+				err = chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(2))
+
+				// second envelope should not reset timer,
+				// so that it expires if we increment by another timeout/2
+				clock.Increment(timeout / 2)
+				Eventually(support.WriteBlockCallCount).Should(Equal(1))
+			})
+
+			It("does not write block if halt before timeout", func() {
+				close(cutter.Block)
+				timeout := time.Second
+				support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+
+				err := chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(1))
+
+				// wait for timer to start
+				Eventually(clock.WatcherCount).Should(Equal(2))
+
+				chain.Halt()
+				Consistently(support.WriteBlockCallCount).Should(Equal(0))
+			})
+
+			It("stops timer if a batch is cut", func() {
+				close(cutter.Block)
+				support.CreateNextBlockReturns(normalBlock)
+
+				timeout := time.Second
+				support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+
+				err := chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(1))
+
+				clock.WaitForNWatchersAndIncrement(timeout/2, 2)
+
+				By("force a batch to be cut before timer expires")
+				cutter.CutNext = true
+				err = chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(support.WriteBlockCallCount).Should(Equal(1))
+				Expect(support.CreateNextBlockArgsForCall(0)).To(HaveLen(2))
+				Expect(cutter.CurBatch).To(HaveLen(0))
+
+				// this should start a fresh timer
+				cutter.CutNext = false
+				err = chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(1))
+
+				clock.WaitForNWatchersAndIncrement(timeout/2, 2)
+				Consistently(support.WriteBlockCallCount).Should(Equal(1))
+
+				clock.Increment(timeout / 2)
+				Eventually(support.WriteBlockCallCount).Should(Equal(2))
+				Expect(support.CreateNextBlockArgsForCall(1)).To(HaveLen(1))
+			})
+
+			It("cut two batches if new envelope does not fit into current one", func() {
+				close(cutter.Block)
+				support.CreateNextBlockReturns(normalBlock)
+
+				timeout := time.Second
+				support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+
+				err := chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+				Eventually(func() int {
+					return len(cutter.CurBatch)
+				}).Should(Equal(1))
+
+				cutter.IsolatedTx = true
+				err = chain.Order(m, uint64(0))
+				Expect(err).NotTo(HaveOccurred())
+
+				Eventually(support.CreateNextBlockCallCount).Should(Equal(2))
+				Eventually(support.WriteBlockCallCount).Should(Equal(2))
+			})
+
+			Context("revalidation", func() {
+				It("enque if an envelope is still valid", func() {
+					close(cutter.Block)
+					support.CreateNextBlockReturns(normalBlock)
+
+					timeout := time.Hour
+					support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+					support.ProcessNormalMsgReturns(1, nil)
+
+					support.SequenceReturns(1)
+
+					err := chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Eventually(func() int {
+						return len(cutter.CurBatch)
+					}).Should(Equal(1))
+
+					err = chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Eventually(func() int {
+						return len(cutter.CurBatch)
+					}).Should(Equal(2))
+				})
+
+				It("does not enque if an envelope is not valid", func() {
+					close(cutter.Block)
+					support.CreateNextBlockReturns(normalBlock)
+
+					timeout := time.Hour
+					support.SharedConfigReturns(&mockconfig.Orderer{BatchTimeoutVal: timeout})
+					support.ProcessNormalMsgReturns(1, errors.Errorf("Envelope is invalid"))
+
+					support.SequenceReturns(1)
+
+					err := chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Eventually(func() int {
+						return len(cutter.CurBatch)
+					}).Should(Equal(1))
+
+					err = chain.Order(m, uint64(0))
+					Expect(err).NotTo(HaveOccurred())
+					Consistently(func() int {
+						return len(cutter.CurBatch)
+					}).Should(Equal(1))
+				})
+			})
+
+			It("unblocks Errored if chain is halted", func() {
+				Expect(chain.Errored()).NotTo(Receive())
+				chain.Halt()
+				Expect(chain.Errored()).Should(BeClosed())
+			})
+
+			It("config message is not yet supported", func() {
+				c := &common.Envelope{
+					Payload: utils.MarshalOrPanic(&common.Payload{
+						Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_CONFIG), ChannelId: channelID})},
+						Data:   []byte("TEST_MESSAGE"),
+					}),
+				}
+
+				Expect(func() {
+					chain.Configure(c, uint64(0))
+				}).To(Panic())
 			})
 		})
 	})

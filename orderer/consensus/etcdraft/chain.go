@@ -171,11 +171,28 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 }
 
 func (c *Chain) serveRequest() {
-	clocking := false
-	timer := c.clock.NewTimer(c.support.SharedConfig().BatchTimeout())
+	ticking := false
+	timer := c.clock.NewTimer(time.Second)
+	// we need a stopped timer rather than nil,
+	// because we will be select waiting on timer.C()
 	if !timer.Stop() {
-		// drain the channel. see godoc of time#Timer.Stop
 		<-timer.C()
+	}
+
+	// if timer is already started, this is no-op
+	start := func() {
+		if !ticking {
+			ticking = true
+			timer.Reset(c.support.SharedConfig().BatchTimeout())
+		}
+	}
+
+	stop := func() {
+		if !timer.Stop() && ticking {
+			// we only need to drain channel if timer expired (not explicitly stopped)
+			<-timer.C()
+		}
+		ticking = false
 	}
 
 	for {
@@ -196,24 +213,18 @@ func (c *Chain) serveRequest() {
 
 			batches, _ := c.support.BlockCutter().Ordered(msg.Content)
 			if len(batches) == 0 {
-				if !clocking {
-					clocking = true
-					timer.Reset(c.support.SharedConfig().BatchTimeout())
-				}
+				start()
 				continue
 			}
 
-			if !timer.Stop() && clocking {
-				<-timer.C()
-			}
-			clocking = false
+			stop()
 
 			if err := c.commitBatches(batches...); err != nil {
 				c.logger.Errorf("Failed to commit block: %s", err)
 			}
 
 		case <-timer.C():
-			clocking = false
+			ticking = false
 
 			batch := c.support.BlockCutter().Cut()
 			if len(batch) == 0 {
