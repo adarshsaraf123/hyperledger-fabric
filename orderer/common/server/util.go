@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"fmt"
+
 	"github.com/hyperledger/fabric/common/ledger/blkstorage/fsblkstorage"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	fileledger "github.com/hyperledger/fabric/common/ledger/blockledger/file"
@@ -18,6 +20,18 @@ import (
 	ramledger "github.com/hyperledger/fabric/common/ledger/blockledger/ram"
 	config "github.com/hyperledger/fabric/orderer/common/localconfig"
 )
+
+type ordererTypes []string
+
+func (types ordererTypes) exists(ordererType string) bool {
+	for _, ot := range types {
+		fmt.Println(ot, ordererType)
+		if ordererType == ot {
+			return true
+		}
+	}
+	return false
+}
 
 func createLedgerFactory(conf *config.TopLevel) (blockledger.Factory, string) {
 	var lf blockledger.Factory

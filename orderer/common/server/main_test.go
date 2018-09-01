@@ -21,6 +21,7 @@ import (
 	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/config/configtest"
+	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/stretchr/testify/assert"
 )
@@ -192,11 +193,13 @@ func TestInitializeBootstrapChannel(t *testing.T) {
 
 			if tc.panics {
 				assert.Panics(t, func() {
-					initializeBootstrapChannel(bootstrapConfig, ledgerFactory)
+					genesisBlock := extractBootstrapBlock(bootstrapConfig)
+					initializeBootstrapChannel(genesisBlock, ledgerFactory)
 				})
 			} else {
 				assert.NotPanics(t, func() {
-					initializeBootstrapChannel(bootstrapConfig, ledgerFactory)
+					genesisBlock := extractBootstrapBlock(bootstrapConfig)
+					initializeBootstrapChannel(genesisBlock, ledgerFactory)
 				})
 			}
 		})
@@ -247,7 +250,7 @@ func TestInitializeMultiChainManager(t *testing.T) {
 	conf := genesisConfig(t)
 	assert.NotPanics(t, func() {
 		initializeLocalMsp(conf)
-		initializeMultichannelRegistrar(conf, localmsp.NewSigner())
+		initializeMultichannelRegistrar(&cluster.PredicateDialer{}, comm.ServerConfig{}, nil, conf, localmsp.NewSigner())
 	})
 }
 
@@ -305,10 +308,10 @@ func TestUpdateTrustedRoots(t *testing.T) {
 	callback := func(bundle *channelconfig.Bundle) {
 		if grpcServer.MutualTLSRequired() {
 			t.Log("callback called")
-			updateTrustedRoots(grpcServer, caSupport, bundle)
+			updateTrustedRoots(grpcServer, caSupport, bundle, &cluster.PredicateDialer{}, nil)
 		}
 	}
-	initializeMultichannelRegistrar(genesisConfig(t), localmsp.NewSigner(), callback)
+	initializeMultichannelRegistrar(&cluster.PredicateDialer{}, comm.ServerConfig{}, nil, genesisConfig(t), localmsp.NewSigner(), callback)
 	t.Logf("# app CAs: %d", len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	t.Logf("# orderer CAs: %d", len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
 	// mutual TLS not required so no updates should have occurred
@@ -333,19 +336,24 @@ func TestUpdateTrustedRoots(t *testing.T) {
 		AppRootCAsByChain:     make(map[string][][]byte),
 		OrdererRootCAsByChain: make(map[string][][]byte),
 	}
+
+	predDialer := &cluster.PredicateDialer{}
+	predDialer.SetConfig(initializeClusterConfig(conf))
+
 	callback = func(bundle *channelconfig.Bundle) {
 		if grpcServer.MutualTLSRequired() {
 			t.Log("callback called")
-			updateTrustedRoots(grpcServer, caSupport, bundle)
+			updateTrustedRoots(grpcServer, caSupport, bundle, predDialer, nil)
 		}
 	}
-	initializeMultichannelRegistrar(genesisConfig(t), localmsp.NewSigner(), callback)
+	initializeMultichannelRegistrar(&cluster.PredicateDialer{}, comm.ServerConfig{}, nil, genesisConfig(t), localmsp.NewSigner(), callback)
 	t.Logf("# app CAs: %d", len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	t.Logf("# orderer CAs: %d", len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
 	// mutual TLS is required so updates should have occurred
 	// we expect an intermediate and root CA for apps and orderers
 	assert.Equal(t, 2, len(caSupport.AppRootCAsByChain[genesisconfig.TestChainID]))
 	assert.Equal(t, 2, len(caSupport.OrdererRootCAsByChain[genesisconfig.TestChainID]))
+	assert.Len(t, predDialer.Config.Load().(comm.ClientConfig).SecOpts.ServerRootCAs, 2)
 	grpcServer.Listener().Close()
 }
 

@@ -16,6 +16,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestExists(t *testing.T) {
+	a := ordererTypes{"a", "b"}
+	assert.True(t, a.exists("a"))
+	assert.True(t, a.exists("b"))
+	assert.False(t, a.exists("c"))
+}
+
 func TestCreateLedgerFactory(t *testing.T) {
 	cleanup := configtest.SetDevFabricConfigPath(t)
 	defer cleanup()

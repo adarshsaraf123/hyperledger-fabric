@@ -8,19 +8,23 @@ package etcdraft
 
 import (
 	"context"
+	"encoding/pem"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/hyperledger/fabric/common/flogging"
-	"github.com/hyperledger/fabric/orderer/consensus"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
-
 	"code.cloudfoundry.org/clock"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric/orderer/common/cluster"
+	"github.com/hyperledger/fabric/orderer/consensus"
+	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protos/orderer"
+	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
+	"github.com/hyperledger/fabric/protos/utils"
 	"github.com/pkg/errors"
 )
 
@@ -55,7 +59,8 @@ type Options struct {
 
 // Chain implements consensus.Chain interface with raft-based consensus
 type Chain struct {
-	raftID uint64
+	configurator Configurator
+	raftID       uint64
 
 	submitC  chan *orderer.SubmitRequest
 	commitC  chan *common.Block
@@ -80,19 +85,20 @@ type Chain struct {
 }
 
 // NewChain constructs a chain object
-func NewChain(support consensus.ConsenterSupport, opts Options, observe chan<- uint64) (*Chain, error) {
+func NewChain(support consensus.ConsenterSupport, opts Options, observe chan<- uint64, configurator Configurator) (*Chain, error) {
 	return &Chain{
-		raftID:   opts.RaftID,
-		submitC:  make(chan *orderer.SubmitRequest),
-		commitC:  make(chan *common.Block),
-		haltC:    make(chan struct{}),
-		doneC:    make(chan struct{}),
-		observeC: observe,
-		support:  support,
-		clock:    opts.Clock,
-		logger:   opts.Logger.With("channel", support.ChainID()),
-		storage:  opts.Storage,
-		opts:     opts,
+		configurator: configurator,
+		raftID:       opts.RaftID,
+		submitC:      make(chan *orderer.SubmitRequest),
+		commitC:      make(chan *common.Block),
+		haltC:        make(chan struct{}),
+		doneC:        make(chan struct{}),
+		observeC:     observe,
+		support:      support,
+		clock:        opts.Clock,
+		logger:       opts.Logger.With("channel", support.ChainID()),
+		storage:      opts.Storage,
+		opts:         opts,
 	}, nil
 }
 
@@ -109,6 +115,12 @@ func (c *Chain) Start() {
 	}
 
 	c.node = raft.StartNode(config, c.opts.Peers)
+
+	if err := c.configureComm(); err != nil {
+		c.logger.Errorf("Failed starting chain, aborting: +%v", err)
+		close(c.doneC)
+		return
+	}
 
 	go c.serveRaft()
 	go c.serveRequest()
@@ -364,4 +376,53 @@ func (c *Chain) isConfig(env *common.Envelope) bool {
 	}
 
 	return h.Type == int32(common.HeaderType_CONFIG) || h.Type == int32(common.HeaderType_ORDERER_TRANSACTION)
+}
+
+func (c *Chain) configureComm() error {
+	nodes, err := c.nodeConfigFromMetadata()
+	if err != nil {
+		return err
+	}
+	c.configurator.Configure(c.support.ChainID(), nodes)
+	return nil
+}
+
+func (c *Chain) nodeConfigFromMetadata() ([]cluster.RemoteNode, error) {
+	var nodes []cluster.RemoteNode
+	m := &etcdraft.Metadata{}
+	if err := proto.Unmarshal(c.support.SharedConfig().ConsensusMetadata(), m); err != nil {
+		return nil, errors.Wrap(err, "failed extracting consensus metadata")
+	}
+
+	for id, consenter := range m.Consenters {
+		raftID := uint64(id + 1)
+		// No need to know yourself
+		if raftID == c.raftID {
+			continue
+		}
+		serverCertAsDER, err := c.pemToDER(consenter.ServerTlsCert, raftID, "server")
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		clientCertAsDER, err := c.pemToDER(consenter.ClientTlsCert, raftID, "client")
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		nodes = append(nodes, cluster.RemoteNode{
+			ID:            raftID,
+			Endpoint:      fmt.Sprintf("%s:%d", consenter.Host, consenter.Port),
+			ServerTLSCert: serverCertAsDER,
+			ClientTLSCert: clientCertAsDER,
+		})
+	}
+	return nodes, nil
+}
+
+func (c *Chain) pemToDER(pemBytes []byte, id uint64, certType string) ([]byte, error) {
+	bl, _ := pem.Decode(pemBytes)
+	if bl == nil {
+		c.logger.Errorf("Rejecting PEM block of %s TLS cert for node %d, offending PEM is: %s", certType, id, string(pemBytes))
+		return nil, errors.Errorf("invalid PEM block")
+	}
+	return bl.Bytes, nil
 }
