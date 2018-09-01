@@ -145,6 +145,11 @@ func (c *Chain) Halt() {
 	<-c.doneC
 }
 
+// Step passes the given StepRequest message to the raft.Node instance
+func (c *Chain) Step(req *orderer.StepRequest, sender uint64) error {
+	panic("not implemented")
+}
+
 // Submit submits requests to
 // - local serveRequest go routine if this is leader
 // - actual leader via transport
