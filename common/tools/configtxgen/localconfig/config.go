@@ -199,6 +199,15 @@ var genesisDefaults = TopLevel{
 		Kafka: Kafka{
 			Brokers: []string{"127.0.0.1:9092"},
 		},
+		EtcdRaft: &etcdraft.Metadata{
+			FSMConfig: &etcdraft.FSMConfig{
+				TickInterval:    100,
+				ElectionTick:    10,
+				HeartbeatTick:   1,
+				MaxInflightMsgs: 256,
+				MaxSizePerMsg:   1048576,
+			},
+		},
 	},
 }
 
@@ -353,6 +362,7 @@ func (org *Organization) completeInitialization(configDir string) {
 }
 
 func (ord *Orderer) completeInitialization(configDir string) {
+	logger.Info("completing initialization for orderer")
 loop:
 	for {
 		switch {
@@ -379,6 +389,7 @@ loop:
 		}
 	}
 
+	logger.Infof("orderer type: %s", ord.OrdererType)
 	// Additional, consensus type-dependent initialization goes here
 	switch ord.OrdererType {
 	case "kafka":
@@ -390,7 +401,48 @@ loop:
 		if ord.EtcdRaft == nil {
 			logger.Panicf("%s raft configuration missing", etcdraft.TypeKey)
 		}
+		if ord.EtcdRaft.FSMConfig == nil {
+			logger.Infof("Orderer.EtcdRaft.FSMConfig unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig)
+			ord.EtcdRaft.FSMConfig = genesisDefaults.Orderer.EtcdRaft.FSMConfig
+		}
+	second_loop:
+		for {
+			switch {
+			case ord.EtcdRaft.FSMConfig.TickInterval == 0:
+				logger.Infof("Orderer.EtcdRaft.FSMConfig.TickInterval unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig.TickInterval)
+				ord.EtcdRaft.FSMConfig.TickInterval = genesisDefaults.Orderer.EtcdRaft.FSMConfig.TickInterval
+
+			case ord.EtcdRaft.FSMConfig.ElectionTick == 0:
+				logger.Infof("Orderer.EtcdRaft.FSMConfig.ElectionTick unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig.ElectionTick)
+				ord.EtcdRaft.FSMConfig.ElectionTick = genesisDefaults.Orderer.EtcdRaft.FSMConfig.ElectionTick
+
+			case ord.EtcdRaft.FSMConfig.HeartbeatTick == 0:
+				logger.Infof("Orderer.EtcdRaft.FSMConfig.HeartbeatTick unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig.HeartbeatTick)
+				ord.EtcdRaft.FSMConfig.HeartbeatTick = genesisDefaults.Orderer.EtcdRaft.FSMConfig.HeartbeatTick
+
+			case ord.EtcdRaft.FSMConfig.MaxInflightMsgs == 0:
+				logger.Infof("Orderer.EtcdRaft.FSMConfig.MaxInflightMsgs unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig.MaxInflightMsgs)
+				ord.EtcdRaft.FSMConfig.MaxInflightMsgs = genesisDefaults.Orderer.EtcdRaft.FSMConfig.MaxInflightMsgs
+
+			case ord.EtcdRaft.FSMConfig.MaxSizePerMsg == 0:
+				logger.Infof("Orderer.EtcdRaft.FSMConfig.MaxSizePerMsg unset, setting to %v", genesisDefaults.Orderer.EtcdRaft.FSMConfig.MaxSizePerMsg)
+				ord.EtcdRaft.FSMConfig.MaxSizePerMsg = genesisDefaults.Orderer.EtcdRaft.FSMConfig.MaxSizePerMsg
+
+			case len(ord.EtcdRaft.Consenters) == 0:
+				logger.Panicf("%s configuration did not specify any consenters", etcdraft.TypeKey)
+
+			default:
+				break second_loop
+			}
+		}
 		for _, c := range ord.EtcdRaft.GetConsenters() {
+			// TODO: should we also panic if the host ip/port is not sprecified?
+			if c.ClientTlsCert == nil {
+				logger.Panicf("consenter info in %s configuration did not specify client TLS cert", etcdraft.TypeKey)
+			}
+			if c.ServerTlsCert == nil {
+				logger.Panicf("consenter info in %s configuration did not specify server TLS cert", etcdraft.TypeKey)
+			}
 			clientCertPath := string(c.GetClientTlsCert())
 			cf.TranslatePathInPlace(configDir, &clientCertPath)
 			c.ClientTlsCert = []byte(clientCertPath)
@@ -399,6 +451,7 @@ loop:
 			c.ServerTlsCert = []byte(serverCertPath)
 		}
 	}
+	fmt.Println("orderer configuration:", ord)
 }
 
 func translatePaths(configDir string, org *Organization) {

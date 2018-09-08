@@ -302,6 +302,12 @@ Orderer: &OrdererDefaults
               Port: 7050
               ClientTLSCert: path/to/ClientTLSCert2
               ServerTLSCert: path/to/ServerTLSCert2
+        FSMConfig:
+            TickInterval: 100
+            ElectionTick:
+            HeartbeatTick: 1
+            MaxInflightMsgs: 256
+            MaxSizePerMsg: 1048576
 
     # Organizations lists the orgs participating on the orderer side of the
     # network.
