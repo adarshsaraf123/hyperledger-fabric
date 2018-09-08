@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	"github.com/hyperledger/fabric/core/config/configtest"
+	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
+
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,11 +80,23 @@ func TestLoadTopLevelWithPath(t *testing.T) {
 }
 
 func TestConsensusSpecificInit(t *testing.T) {
+	g := NewGomegaWithT(t)
 	cleanup := configtest.SetDevFabricConfigPath(t)
 	defer cleanup()
 
 	devConfigDir, err := configtest.GetDevConfigDir()
 	require.NoError(t, err)
+
+	t.Run("nil orderer type", func(t *testing.T) {
+		profile := &Profile{
+			Orderer: &Orderer{
+				OrdererType: "",
+			},
+		}
+		profile.completeInitialization(devConfigDir)
+
+		assert.Equal(t, profile.Orderer.OrdererType, genesisDefaults.Orderer.OrdererType)
+	})
 
 	t.Run("solo", func(t *testing.T) {
 		profile := &Profile{
@@ -101,5 +116,136 @@ func TestConsensusSpecificInit(t *testing.T) {
 		}
 		profile.completeInitialization(devConfigDir)
 		assert.NotNil(t, profile.Orderer.Kafka.Brokers, "Kafka config settings should be set")
+	})
+
+	t.Run("raft", func(t *testing.T) {
+		makeProfile := func(consenters []*etcdraft.Consenter, fsmConfig *etcdraft.FSMConfig) *Profile {
+			return &Profile{
+				Orderer: &Orderer{
+					OrdererType: "etcdraft",
+					EtcdRaft: &etcdraft.Metadata{
+						Consenters: consenters,
+						FSMConfig:  fsmConfig,
+					},
+				},
+			}
+		}
+		t.Run("EtcdRaft section not specified in profile", func(t *testing.T) {
+			profile := &Profile{
+				Orderer: &Orderer{
+					OrdererType: "etcdraft",
+				},
+			}
+
+			g.Expect(func() {
+				profile.completeInitialization(devConfigDir)
+			}).To(Panic(), "should panic if EtcdRaft section is not specified")
+		})
+
+		t.Run("nil consenter set", func(t *testing.T) { // should panic
+			profile := makeProfile(nil, nil)
+
+			g.Expect(func() {
+				profile.completeInitialization(devConfigDir)
+			}).To(Panic(), "should panic if the consenter set is nil")
+		})
+
+		t.Run("single consenter", func(t *testing.T) {
+			consenters := []*etcdraft.Consenter{
+				{
+					Host:          "node-1.example.com",
+					Port:          7050,
+					ClientTlsCert: []byte("path/to/client/cert"),
+					ServerTlsCert: []byte("path/to/server/cert"),
+				},
+			}
+
+			t.Run("no client TLS cert in consenter", func(t *testing.T) {
+				consenters := []*etcdraft.Consenter{
+					{
+						Host:          "node-1.example.com",
+						Port:          7050,
+						ServerTlsCert: []byte("path/to/server/cert"),
+					},
+				}
+				profile := makeProfile(consenters, nil)
+
+				g.Expect(func() {
+					profile.completeInitialization(devConfigDir)
+				}).To(Panic(), "should panic if client cert for consenter is not specified")
+			})
+
+			t.Run("no server TLS cert in consenter", func(t *testing.T) {
+				consenters := []*etcdraft.Consenter{
+					{
+						Host:          "node-1.example.com",
+						Port:          7050,
+						ClientTlsCert: []byte("path/to/client/cert"),
+					},
+				}
+				profile := makeProfile(consenters, nil)
+
+				g.Expect(func() {
+					profile.completeInitialization(devConfigDir)
+				}).To(Panic(), "should panic if server cert for consenter is not specified")
+			})
+
+			t.Run("nil FSMConfig", func(t *testing.T) {
+				profile := makeProfile(consenters, nil)
+				profile.completeInitialization(devConfigDir)
+
+				// need not be tested in subsequent tests
+				assert.NotNil(t, profile.Orderer.EtcdRaft, "EtcdRaft config settings should be set")
+				assert.Equal(t, profile.Orderer.EtcdRaft.Consenters[0].ClientTlsCert, consenters[0].ClientTlsCert,
+					"Client TLS cert path should be correctly set")
+
+				// specific assertion for this test context
+				assert.Equal(t, profile.Orderer.EtcdRaft.FSMConfig, genesisDefaults.Orderer.EtcdRaft.FSMConfig,
+					"FSMConfig should be set to the default value")
+			})
+
+			t.Run("heartbeat tick specified in FSMConfig", func(t *testing.T) {
+				heartbeatTick := uint32(2)
+				fsmConfig := &etcdraft.FSMConfig{ // partially set so that we can check that the other members are set to defaults
+					HeartbeatTick: heartbeatTick,
+				}
+				profile := makeProfile(consenters, fsmConfig)
+				profile.completeInitialization(devConfigDir)
+
+				// specific assertions for this test context
+				assert.Equal(t, profile.Orderer.EtcdRaft.FSMConfig.HeartbeatTick, heartbeatTick,
+					"HeartbeatTick should be set to the specified value")
+				assert.Equal(t, profile.Orderer.EtcdRaft.FSMConfig.ElectionTick, genesisDefaults.Orderer.EtcdRaft.FSMConfig.ElectionTick,
+					"ElectionTick should be set to the default value")
+			})
+
+			t.Run("election tick specified in FSMConfig", func(t *testing.T) {
+				electionTick := uint32(20)
+				fsmConfig := &etcdraft.FSMConfig{ // partially set so that we can check that the other members are set to defaults
+					ElectionTick: electionTick,
+				}
+				profile := makeProfile(consenters, fsmConfig)
+				profile.completeInitialization(devConfigDir)
+
+				// specific assertions for this test context
+				assert.Equal(t, profile.Orderer.EtcdRaft.FSMConfig.ElectionTick, electionTick,
+					"ElectionTick should be set to the specified value")
+				assert.Equal(t, profile.Orderer.EtcdRaft.FSMConfig.HeartbeatTick, genesisDefaults.Orderer.EtcdRaft.FSMConfig.HeartbeatTick,
+					"HeartbeatTick should be set to the default value")
+			})
+
+			t.Run("panic on invalid fsm config", func(t *testing.T) {
+				// set of fsmConfigs with invalid options
+				fsmConfig := &etcdraft.FSMConfig{
+					HeartbeatTick: 2,
+					ElectionTick:  1,
+				}
+				profile := makeProfile(consenters, fsmConfig)
+
+				g.Expect(func() {
+					profile.completeInitialization(devConfigDir)
+				}).To(Panic())
+			})
+		})
 	})
 }
