@@ -418,6 +418,10 @@ func (c *Chain) ordered(msg *orderer.SubmitRequest) (batches [][]*common.Envelop
 func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 	for _, batch := range batches {
 		b := c.support.CreateNextBlock(batch)
+		if b == nil {
+			// no point of continuing with the next batch, in case this is the first of the two
+			return errors.Errorf("failed to create block")
+		}
 		data := utils.MarshalOrPanic(b)
 		if err := c.node.Propose(context.TODO(), data); err != nil {
 			return errors.Errorf("failed to propose data to Raft node: %s", err)

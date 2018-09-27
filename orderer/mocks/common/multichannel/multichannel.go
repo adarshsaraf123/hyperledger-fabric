@@ -84,6 +84,10 @@ func (mcs *ConsenterSupport) CreateNextBlock(data []*cb.Envelope) *cb.Block {
 	return block
 }
 
+// DiscardCreatedBlocks is a no-op here since there is no queue of created blocks maintained.
+func (mcs *ConsenterSupport) DiscardCreatedBlocks() {
+}
+
 // WriteBlock writes data to the Blocks channel
 func (mcs *ConsenterSupport) WriteBlock(block *cb.Block, encodedMetadataValue []byte) {
 	if encodedMetadataValue != nil {

@@ -133,6 +133,9 @@ func (ch *chain) main() {
 
 				for _, batch := range batches {
 					block := ch.support.CreateNextBlock(batch)
+					if block == nil {
+						logger.Panic("CreateNextBlock failed; this should never happen")
+					}
 					ch.support.WriteBlock(block, nil)
 				}
 
@@ -162,10 +165,16 @@ func (ch *chain) main() {
 				batch := ch.support.BlockCutter().Cut()
 				if batch != nil {
 					block := ch.support.CreateNextBlock(batch)
+					if block == nil {
+						logger.Panic("CreateNextBlock failed; this should never happen")
+					}
 					ch.support.WriteBlock(block, nil)
 				}
 
 				block := ch.support.CreateNextBlock([]*cb.Envelope{msg.configMsg})
+				if block == nil {
+					logger.Panic("CreateNextBlock failed; this should never happen")
+				}
 				ch.support.WriteConfigBlock(block, nil)
 				timer = nil
 			}
@@ -180,6 +189,9 @@ func (ch *chain) main() {
 			}
 			logger.Debugf("Batch timer expired, creating block")
 			block := ch.support.CreateNextBlock(batch)
+			if block == nil {
+				logger.Panic("CreateNextBlock failed; this should never happen")
+			}
 			ch.support.WriteBlock(block, nil)
 		case <-ch.exitChan:
 			logger.Debugf("Exiting")

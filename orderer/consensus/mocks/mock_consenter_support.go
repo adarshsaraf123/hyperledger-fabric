@@ -119,9 +119,12 @@ type FakeConsenterSupport struct {
 	createNextBlockReturnsOnCall map[int]struct {
 		result1 *cb.Block
 	}
-	WriteBlockStub        func(block *cb.Block, encodedMetadataValue []byte)
-	writeBlockMutex       sync.RWMutex
-	writeBlockArgsForCall []struct {
+	DiscardCreatedBlocksStub        func()
+	discardCreatedBlocksMutex       sync.RWMutex
+	discardCreatedBlocksArgsForCall []struct{}
+	WriteBlockStub                  func(block *cb.Block, encodedMetadataValue []byte)
+	writeBlockMutex                 sync.RWMutex
+	writeBlockArgsForCall           []struct {
 		block                *cb.Block
 		encodedMetadataValue []byte
 	}
@@ -601,6 +604,22 @@ func (fake *FakeConsenterSupport) CreateNextBlockReturnsOnCall(i int, result1 *c
 	}{result1}
 }
 
+func (fake *FakeConsenterSupport) DiscardCreatedBlocks() {
+	fake.discardCreatedBlocksMutex.Lock()
+	fake.discardCreatedBlocksArgsForCall = append(fake.discardCreatedBlocksArgsForCall, struct{}{})
+	fake.recordInvocation("DiscardCreatedBlocks", []interface{}{})
+	fake.discardCreatedBlocksMutex.Unlock()
+	if fake.DiscardCreatedBlocksStub != nil {
+		fake.DiscardCreatedBlocksStub()
+	}
+}
+
+func (fake *FakeConsenterSupport) DiscardCreatedBlocksCallCount() int {
+	fake.discardCreatedBlocksMutex.RLock()
+	defer fake.discardCreatedBlocksMutex.RUnlock()
+	return len(fake.discardCreatedBlocksArgsForCall)
+}
+
 func (fake *FakeConsenterSupport) WriteBlock(block *cb.Block, encodedMetadataValue []byte) {
 	var encodedMetadataValueCopy []byte
 	if encodedMetadataValue != nil {
@@ -802,6 +821,8 @@ func (fake *FakeConsenterSupport) Invocations() map[string][][]interface{} {
 	defer fake.sharedConfigMutex.RUnlock()
 	fake.createNextBlockMutex.RLock()
 	defer fake.createNextBlockMutex.RUnlock()
+	fake.discardCreatedBlocksMutex.RLock()
+	defer fake.discardCreatedBlocksMutex.RUnlock()
 	fake.writeBlockMutex.RLock()
 	defer fake.writeBlockMutex.RUnlock()
 	fake.writeConfigBlockMutex.RLock()

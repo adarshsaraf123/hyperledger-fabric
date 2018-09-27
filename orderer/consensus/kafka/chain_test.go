@@ -3679,6 +3679,9 @@ func (c *mockConsenterSupport) CreateNextBlock(messages []*cb.Envelope) *cb.Bloc
 	return args.Get(0).(*cb.Block)
 }
 
+func (c *mockConsenterSupport) DiscardCreatedBlocks() {
+}
+
 func (c *mockConsenterSupport) WriteBlock(block *cb.Block, encodedMetadataValue []byte) {
 	c.Called(block, encodedMetadataValue)
 	return

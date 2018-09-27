@@ -80,11 +80,16 @@ type ConsenterSupport interface {
 	// SharedConfig provides the shared config from the channel's current config block.
 	SharedConfig() channelconfig.Orderer
 
-	// CreateNextBlock takes a list of messages and creates the next block based on the block with highest block number committed to the ledger
-	// Note that either WriteBlock or WriteConfigBlock must be called before invoking this method a second time.
+	// CreateNextBlock takes a list of messages and creates the next block
+	// based on the last created block. The created block is then part of a
+	// stack of created blocks which may or may not be written eventually.
 	CreateNextBlock(messages []*cb.Envelope) *cb.Block
 
-	// WriteBlock commits a block to the ledger.
+	// DiscardCreatedBlocks discards the createdBlocks stack.
+	DiscardCreatedBlocks()
+
+	// WriteBlock commits a block to the ledger while popping the block from the
+	// createdBlocks stack if it is not divergent else discarding the stack.
 	WriteBlock(block *cb.Block, encodedMetadataValue []byte)
 
 	// WriteConfigBlock commits a block to the ledger, and applies the config update inside.

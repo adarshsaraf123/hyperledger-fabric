@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package multichannel
 
 import (
+	"bytes"
 	"sync"
 
 	newchannelconfig "github.com/hyperledger/fabric/common/channelconfig"
@@ -19,6 +20,10 @@ import (
 
 	"github.com/golang/protobuf/proto"
 )
+
+// this governs the max number of created blocks in-flight; i.e. blocks that were created but not written
+// CreateNextBLock returns nil once this number of blocks are in-flight.
+const createdBlocksBuffersize = 20
 
 type blockWriterSupport interface {
 	crypto.LocalSigner
@@ -37,35 +42,49 @@ type BlockWriter struct {
 	registrar          *Registrar
 	lastConfigBlockNum uint64
 	lastConfigSeq      uint64
-	lastBlock          *cb.Block
-	committingBlock    sync.Mutex
+	createdBlocks      chan *cb.Block
+
+	creatingBlock    sync.Mutex
+	lastCreatedBlock *cb.Block
+
+	writingBlock     sync.Mutex
+	lastWrittenBlock *cb.Block
 }
 
-func newBlockWriter(lastBlock *cb.Block, r *Registrar, support blockWriterSupport) *BlockWriter {
+func newBlockWriter(lastWrittenBlock *cb.Block, r *Registrar, support blockWriterSupport) *BlockWriter {
 	bw := &BlockWriter{
-		support:       support,
-		lastConfigSeq: support.Sequence(),
-		lastBlock:     lastBlock,
-		registrar:     r,
+		support:          support,
+		lastConfigSeq:    support.Sequence(),
+		registrar:        r,
+		lastWrittenBlock: lastWrittenBlock,
+		lastCreatedBlock: lastWrittenBlock,
+		createdBlocks:    make(chan *cb.Block, createdBlocksBuffersize),
 	}
 
 	// If this is the genesis block, the lastconfig field may be empty, and, the last config block is necessarily block 0
 	// so no need to initialize lastConfig
-	if lastBlock.Header.Number != 0 {
+	if lastWrittenBlock.Header.Number != 0 {
 		var err error
-		bw.lastConfigBlockNum, err = utils.GetLastConfigIndexFromBlock(lastBlock)
+		bw.lastConfigBlockNum, err = utils.GetLastConfigIndexFromBlock(lastWrittenBlock)
 		if err != nil {
 			logger.Panicf("[channel: %s] Error extracting last config block from block metadata: %s", support.ChainID(), err)
 		}
 	}
 
-	logger.Debugf("[channel: %s] Creating block writer for tip of chain (blockNumber=%d, lastConfigBlockNum=%d, lastConfigSeq=%d)", support.ChainID(), lastBlock.Header.Number, bw.lastConfigBlockNum, bw.lastConfigSeq)
+	logger.Debugf("[channel: %s] Creating block writer for tip of chain (blockNumber=%d, lastConfigBlockNum=%d, lastConfigSeq=%d)", support.ChainID(), lastWrittenBlock.Header.Number, bw.lastConfigBlockNum, bw.lastConfigSeq)
 	return bw
 }
 
-// CreateNextBlock creates a new block with the next block number, and the given contents.
+// CreateNextBlock creates a new block with the next block number, and the
+// given contents.
+// Returns the created block if the block could be created else nil.
+// It can fail when the there are `createdBlocksBuffersize` blocks already
+// created and no more can be accomodated in the `createdBlocks` channel.
 func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
-	previousBlockHash := bw.lastBlock.Header.Hash()
+	bw.creatingBlock.Lock()
+	defer bw.creatingBlock.Unlock()
+
+	previousBlockHash := bw.lastCreatedBlock.Header.Hash()
 
 	data := &cb.BlockData{
 		Data: make([][]byte, len(messages)),
@@ -79,11 +98,32 @@ func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 		}
 	}
 
-	block := cb.NewBlock(bw.lastBlock.Header.Number+1, previousBlockHash)
+	block := cb.NewBlock(bw.lastCreatedBlock.Header.Number+1, previousBlockHash)
 	block.Header.DataHash = data.Hash()
 	block.Data = data
 
-	return block
+	select {
+	case bw.createdBlocks <- block:
+		bw.lastCreatedBlock = block
+		logger.Debugf("[channel: %s] Created block %d", bw.support.ChainID(), bw.lastCreatedBlock.GetHeader().Number)
+		return block
+	default:
+		return nil
+	}
+}
+
+// DiscardCreatedBlocks discards the createdBlocks stack.
+func (bw *BlockWriter) DiscardCreatedBlocks() {
+	// acquiring these locks in the same order as they are done in
+	// WriteBlock to preclude the possibility of a deadlock.
+	bw.writingBlock.Lock()
+	bw.creatingBlock.Lock()
+
+	bw.createdBlocks = make(chan *cb.Block, createdBlocksBuffersize)
+	bw.lastCreatedBlock = bw.lastWrittenBlock
+
+	bw.creatingBlock.Unlock()
+	bw.writingBlock.Unlock()
 }
 
 // WriteConfigBlock should be invoked for blocks which contain a config transaction.
@@ -147,30 +187,54 @@ func (bw *BlockWriter) WriteConfigBlock(block *cb.Block, encodedMetadataValue []
 // then release the lock.  This allows the calling thread to begin assembling the next block
 // before the commit phase is complete.
 func (bw *BlockWriter) WriteBlock(block *cb.Block, encodedMetadataValue []byte) {
-	bw.committingBlock.Lock()
-	bw.lastBlock = block
+	bw.writingBlock.Lock()
+	bw.lastWrittenBlock = block
+
+	// check if the written block diverges from the created blocks
+	select {
+	case b := <-bw.createdBlocks:
+		if !bytes.Equal(b.Header.Bytes(), block.Header.Bytes()) {
+			// the written block is diverging from the createBlocks stack
+			// reset the createdBlocks channel
+			bw.creatingBlock.Lock()
+
+			bw.createdBlocks = make(chan *cb.Block, createdBlocksBuffersize)
+			bw.lastCreatedBlock = block
+
+			bw.creatingBlock.Unlock()
+		}
+		// else the written block is part of the createBlocks stack; nothing to be done
+	default:
+		// No created blocks; set this block as the last created block.
+		// This happens when calls to WriteBlock are being made without a CreateNextBlock being called.
+		// For example, in the case of etcd/raft, the leader proposes blocks and the followers
+		// only write the proposed blocks.
+		bw.creatingBlock.Lock()
+		bw.lastCreatedBlock = block
+		bw.creatingBlock.Unlock()
+	}
 
 	go func() {
-		defer bw.committingBlock.Unlock()
+		defer bw.writingBlock.Unlock()
 		bw.commitBlock(encodedMetadataValue)
 	}()
 }
 
-// commitBlock should only ever be invoked with the bw.committingBlock held
+// commitBlock should only ever be invoked with the bw.writingBlock held
 // this ensures that the encoded config sequence numbers stay in sync
 func (bw *BlockWriter) commitBlock(encodedMetadataValue []byte) {
 	// Set the orderer-related metadata field
 	if encodedMetadataValue != nil {
-		bw.lastBlock.Metadata.Metadata[cb.BlockMetadataIndex_ORDERER] = utils.MarshalOrPanic(&cb.Metadata{Value: encodedMetadataValue})
+		bw.lastWrittenBlock.Metadata.Metadata[cb.BlockMetadataIndex_ORDERER] = utils.MarshalOrPanic(&cb.Metadata{Value: encodedMetadataValue})
 	}
-	bw.addBlockSignature(bw.lastBlock)
-	bw.addLastConfigSignature(bw.lastBlock)
+	bw.addBlockSignature(bw.lastWrittenBlock)
+	bw.addLastConfigSignature(bw.lastWrittenBlock)
 
-	err := bw.support.Append(bw.lastBlock)
+	err := bw.support.Append(bw.lastWrittenBlock)
 	if err != nil {
 		logger.Panicf("[channel: %s] Could not append block: %s", bw.support.ChainID(), err)
 	}
-	logger.Debugf("[channel: %s] Wrote block %d", bw.support.ChainID(), bw.lastBlock.GetHeader().Number)
+	logger.Debugf("[channel: %s] Wrote block %d", bw.support.ChainID(), bw.lastWrittenBlock.GetHeader().Number)
 }
 
 func (bw *BlockWriter) addBlockSignature(block *cb.Block) {
