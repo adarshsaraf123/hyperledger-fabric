@@ -17,6 +17,7 @@ limitations under the License.
 package multichannel
 
 import (
+	"bytes"
 	"testing"
 
 	newchannelconfig "github.com/hyperledger/fabric/common/channelconfig"
@@ -26,6 +27,8 @@ import (
 	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
+
+	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -45,7 +48,10 @@ func TestCreateBlock(t *testing.T) {
 	seedBlock := cb.NewBlock(7, []byte("lasthash"))
 	seedBlock.Data.Data = [][]byte{[]byte("somebytes")}
 
-	bw := &BlockWriter{lastBlock: seedBlock}
+	bw := &BlockWriter{
+		lastProposedBlock: seedBlock,
+		proposedBlocks:    make(chan *cb.Block, 10),
+	}
 	block := bw.CreateNextBlock([]*cb.Envelope{
 		{Payload: []byte("some other bytes")},
 	})
@@ -191,4 +197,115 @@ func TestGoodWriteConfig(t *testing.T) {
 
 	omd := utils.GetMetadataFromBlockOrPanic(block, cb.BlockMetadataIndex_ORDERER)
 	assert.Equal(t, consenterMetadata, omd.Value)
+}
+
+func TestValidProposeBlocksQueue(t *testing.T) {
+	logger.Info("testing propose blocks")
+	l := NewRAMLedger(10)
+
+	bw := &BlockWriter{
+		support: &mockBlockWriterSupport{
+			LocalSigner: mockCrypto(),
+			ReadWriter:  l,
+			Validator:   &mockconfigtx.Validator{},
+		},
+		proposedBlocks: make(chan *cb.Block, 10),
+	}
+
+	ctx := makeConfigTx(genesisconfig.TestChainID, 1)
+	block := cb.NewBlock(1, genesisBlock.Header.Hash())
+	block.Data.Data = [][]byte{utils.MarshalOrPanic(ctx)}
+	consenterMetadata := []byte("foo")
+	bw.WriteConfigBlock(block, consenterMetadata)
+
+	// Wait for the commit to complete
+	bw.committingBlock.Lock()
+	bw.committingBlock.Unlock()
+
+	t.Run("succesfully propose blocks decoupling CreateNextBlock from WriteBlock", func(t *testing.T) {
+		// Scenario:
+		//   We create five blocks initially and then write only two of them. We further create five more blocks
+		//   and write out the remaining 8 blocks in the propose stack. This should succeed since the written
+		//   blocks are not divergent from the proposed blocks.
+		assert.NotPanics(t, func() {
+			blocks := []*cb.Block{}
+			// Create five blocks without writing them out
+			for i := 0; i < 5; i++ {
+				blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+			}
+
+			// Write two of these out
+			for i := 0; i < 2; i++ {
+				bw.WriteBlock(blocks[i], nil)
+			}
+
+			// Create five more blocks; these should be created over the previous five blocks created
+			for i := 0; i < 5; i++ {
+				blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+			}
+
+			// Write out the remaining eight blocks; can only succeed if all the blocks were created in a single stack else will panic
+			for i := 2; i < 10; i++ {
+				bw.WriteBlock(blocks[i], nil)
+			}
+		})
+	})
+
+	t.Run("proposed blocks should always be over written blocks", func(t *testing.T) {
+		// Scenario:
+		//   We will create
+		//     1. a propose stack with 5 blocks over baseLastProposedBlock, and
+		//     2. an alternate block over baseLastProposedBlock.
+		//   We will write out this alternate block and verify the subsequent block is created over this alternate block.
+
+		baseLastProposedBlock := bw.lastProposedBlock
+
+		// Create the stack of five blocks without writing them out
+		chain := []*cb.Block{}
+		for i := 0; i < 5; i++ {
+			chain = append(chain, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+		}
+
+		// create and write out the alternate block
+		alternateBlock := createBlockOverSpecifiedBlock(baseLastProposedBlock, []*cb.Envelope{{Payload: []byte("alternate test envelope")}})
+		bw.WriteBlock(alternateBlock, nil)
+
+		// TODO: the current challenge is that WriteBlock does not panic; instead commitBlock launched as a goroutine
+		// 	 by WriteBlock panics. Need to figure out how to test this commitBlock panic
+		// writing blocks from the alternate stack should panic
+		// assert.Panics(t, func() {
+		// 	bw.WriteBlock(chain[0], nil) // should panic since this was not the expected block number
+		// 	bw.WriteBlock(chain[1], nil) // should panic since the previous block hash will not match
+		// })
+
+		// assert that CreateNextBlock creates the next block over this alternateBlock
+		createdBlockOverAlternateBlock := bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}})
+		synthesizedBlockOverAlternateBlock := createBlockOverSpecifiedBlock(alternateBlock, []*cb.Envelope{{Payload: []byte("test envelope")}})
+		assert.True(t,
+			bytes.Equal(createdBlockOverAlternateBlock.Header.Bytes(), synthesizedBlockOverAlternateBlock.Header.Bytes()),
+			"created and synthesized blocks should be equal",
+		)
+	})
+}
+
+func createBlockOverSpecifiedBlock(baseBlock *cb.Block, messages []*cb.Envelope) *cb.Block {
+	previousBlockHash := baseBlock.Header.Hash()
+
+	data := &cb.BlockData{
+		Data: make([][]byte, len(messages)),
+	}
+
+	var err error
+	for i, msg := range messages {
+		data.Data[i], err = proto.Marshal(msg)
+		if err != nil {
+			logger.Panicf("Could not marshal envelope: %s", err)
+		}
+	}
+
+	block := cb.NewBlock(baseBlock.Header.Number+1, previousBlockHash)
+	block.Header.DataHash = data.Hash()
+	block.Data = data
+
+	return block
 }
