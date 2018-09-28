@@ -45,6 +45,7 @@ type BlockWriter struct {
 	lastCreatedBlock   *cb.Block
 	createdBlocks      chan *cb.Block
 	committingBlock    sync.Mutex
+	creatingBlock      sync.Mutex
 }
 
 func newBlockWriter(lastWrittenBlock *cb.Block, r *Registrar, support blockWriterSupport) *BlockWriter {
@@ -73,6 +74,9 @@ func newBlockWriter(lastWrittenBlock *cb.Block, r *Registrar, support blockWrite
 
 // CreateNextBlock creates a new block with the next block number, and the given contents.
 func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
+	bw.creatingBlock.Lock()
+	defer bw.creatingBlock.Unlock()
+
 	previousBlockHash := bw.lastCreatedBlock.Header.Hash()
 
 	data := &cb.BlockData{

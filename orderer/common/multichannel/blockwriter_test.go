@@ -18,6 +18,7 @@ package multichannel
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	newchannelconfig "github.com/hyperledger/fabric/common/channelconfig"
@@ -287,24 +288,25 @@ func TestValidCreatedBlocksQueue(t *testing.T) {
 	})
 
 	t.Run("allow parallel goroutines to call CreateNextBlock", func(t *testing.T) {
-		// Scenario:
-		//   We create five blocks initially and then write only two of them. We further create five more blocks
-		//   and write out the remaining 8 blocks in the propose stack. This should succeed since the written
-		//   blocks are not divergent from the created blocks.
-		assert.NotPanics(t, func() {
-			blocks := []*cb.Block{}
-			for i := 0; i < 10; i++ {
-				go func() {
-					blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
-				}()
-			}
+		blocks := []*cb.Block{}
+		wg := sync.WaitGroup{}
 
-			// sort the blocks by block number since the goroutines could have been executed in any order
-			// sort.Slice(blocks, func(i, j int) bool { return blocks[i].Header.Number < blocks[j].Header.Number })
-			for i := 0; i < 9; i++ {
-				assert.Equal(t, blocks[i].Header.Number+1, blocks[i+1].Header.Number)
-			}
-		})
+		wg.Add(10)
+		for i := 0; i < 10; i++ {
+			go func() {
+				blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+				wg.Done()
+			}()
+		}
+
+		wg.Wait()
+		for i := 0; i < 9; i++ {
+			assert.Equal(t, blocks[i].Header.Number+1, blocks[i+1].Header.Number)
+		}
+
+		for i := 0; i < 10; i++ {
+			bw.WriteBlock(blocks[i], nil)
+		}
 	})
 }
 
