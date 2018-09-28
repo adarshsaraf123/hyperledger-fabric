@@ -18,8 +18,10 @@ package multichannel
 
 import (
 	"bytes"
+	"math/rand"
 	"sync"
 	"testing"
+	"time"
 
 	newchannelconfig "github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/crypto"
@@ -288,6 +290,9 @@ func TestValidCreatedBlocksQueue(t *testing.T) {
 	})
 
 	t.Run("allow parallel goroutines to call CreateNextBlock", func(t *testing.T) {
+		// Scenario:
+		//   We launch multiple goroutines each of which calls CreateNextBlock.
+		//   They should all succeed, creating blocks in the right order.
 		blocks := []*cb.Block{}
 		wg := sync.WaitGroup{}
 
@@ -307,6 +312,43 @@ func TestValidCreatedBlocksQueue(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			bw.WriteBlock(blocks[i], nil)
 		}
+	})
+
+	t.Run("ensure parallel WriteBlock resets the createdBlocks queue", func(t *testing.T) {
+		// Scenario:
+		//   We launch multiple goroutines each of which calls CreateNextBlock after a random delay.
+		//   We also launch another goroutine to write an alternate block.
+		//   Idea is that the call to WriteBlock should interfere with the calls to CreateNextBlock causing
+		//   a reset of the createdBlocks queue exactly once.
+		blocks := []*cb.Block{}
+		wg := sync.WaitGroup{}
+
+		baseLastCreatedBlock := bw.lastCreatedBlock
+		alternateBlock := createBlockOverSpecifiedBlock(baseLastCreatedBlock, []*cb.Envelope{{Payload: []byte("alternate test envelope")}})
+
+		wg.Add(11)
+		for i := 0; i < 10; i++ {
+			go func() {
+				r := rand.Intn(10)
+				time.Sleep(time.Duration(r*50) * time.Millisecond)
+				blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+				wg.Done()
+			}()
+		}
+		go func() {
+			bw.WriteBlock(alternateBlock, nil)
+			wg.Done()
+		}()
+
+		wg.Wait()
+
+		resetCount := 0
+		for i := 0; i < 9; i++ {
+			if blocks[i+1].Header.Number != blocks[i].Header.Number+1 {
+				resetCount++
+			}
+		}
+		assert.Equal(t, resetCount, 1)
 	})
 }
 

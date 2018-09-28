@@ -168,7 +168,9 @@ func (bw *BlockWriter) WriteBlock(block *cb.Block, encodedMetadataValue []byte) 
 	bw.lastWrittenBlock = block
 
 	updateLastCreatedBlock := func() {
+		bw.creatingBlock.Lock()
 		bw.lastCreatedBlock = block
+		bw.creatingBlock.Unlock()
 	}
 
 	// check if the written block diverges from the created blocks
