@@ -21,8 +21,8 @@ import (
 	"github.com/golang/protobuf/proto"
 )
 
-// this governs the max number of proposed blocks in-flight; i.e. blocks that were proposed but not written
-var proposedBlocksBuffersize = 10
+// this governs the max number of created blocks in-flight; i.e. blocks that were created but not written
+const createdBlocksBuffersize = 10
 
 type blockWriterSupport interface {
 	crypto.LocalSigner
@@ -42,19 +42,19 @@ type BlockWriter struct {
 	lastConfigBlockNum uint64
 	lastConfigSeq      uint64
 	lastWrittenBlock   *cb.Block
-	lastProposedBlock  *cb.Block
+	lastCreatedBlock   *cb.Block
+	createdBlocks      chan *cb.Block
 	committingBlock    sync.Mutex
-	proposedBlocks     chan *cb.Block
 }
 
 func newBlockWriter(lastWrittenBlock *cb.Block, r *Registrar, support blockWriterSupport) *BlockWriter {
 	bw := &BlockWriter{
-		support:           support,
-		lastConfigSeq:     support.Sequence(),
-		registrar:         r,
-		lastWrittenBlock:  lastWrittenBlock,
-		lastProposedBlock: lastWrittenBlock,
-		proposedBlocks:    make(chan *cb.Block, proposedBlocksBuffersize),
+		support:          support,
+		lastConfigSeq:    support.Sequence(),
+		registrar:        r,
+		lastWrittenBlock: lastWrittenBlock,
+		lastCreatedBlock: lastWrittenBlock,
+		createdBlocks:    make(chan *cb.Block, createdBlocksBuffersize),
 	}
 
 	// If this is the genesis block, the lastconfig field may be empty, and, the last config block is necessarily block 0
@@ -73,7 +73,7 @@ func newBlockWriter(lastWrittenBlock *cb.Block, r *Registrar, support blockWrite
 
 // CreateNextBlock creates a new block with the next block number, and the given contents.
 func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
-	previousBlockHash := bw.lastProposedBlock.Header.Hash()
+	previousBlockHash := bw.lastCreatedBlock.Header.Hash()
 
 	data := &cb.BlockData{
 		Data: make([][]byte, len(messages)),
@@ -87,14 +87,14 @@ func (bw *BlockWriter) CreateNextBlock(messages []*cb.Envelope) *cb.Block {
 		}
 	}
 
-	block := cb.NewBlock(bw.lastProposedBlock.Header.Number+1, previousBlockHash)
+	block := cb.NewBlock(bw.lastCreatedBlock.Header.Number+1, previousBlockHash)
 	block.Header.DataHash = data.Hash()
 	block.Data = data
 
-	bw.proposedBlocks <- block
-	bw.lastProposedBlock = block
+	bw.createdBlocks <- block
+	bw.lastCreatedBlock = block
 
-	logger.Info("proposed block:", block)
+	logger.Debugf("[channel: %s] Created block %d", bw.support.ChainID(), bw.lastCreatedBlock.GetHeader().Number)
 
 	return block
 }
@@ -163,26 +163,26 @@ func (bw *BlockWriter) WriteBlock(block *cb.Block, encodedMetadataValue []byte) 
 	bw.committingBlock.Lock()
 	bw.lastWrittenBlock = block
 
-	logger.Info("writing block:", block)
+	updateLastCreatedBlock := func() {
+		bw.lastCreatedBlock = block
+	}
 
-	// check if the written block diverges from the proposed blocks
+	// check if the written block diverges from the created blocks
 	select {
-	case b := <-bw.proposedBlocks:
+	case b := <-bw.createdBlocks:
 		if !bytes.Equal(b.Header.Bytes(), block.Header.Bytes()) {
-			logger.Info("flushing the proposedBlocks channel")
-			// flush the proposed blocks channel since it is diverging from the chain being written
-			for len(bw.proposedBlocks) > 0 {
-				<-bw.proposedBlocks
+			// the written block is diverging from the createBlocks stack
+			// flush the createdBlocks channel
+			for len(bw.createdBlocks) > 0 {
+				<-bw.createdBlocks
 			}
-			bw.lastProposedBlock = block
-			logger.Info("updated proposed block:", block)
+			updateLastCreatedBlock()
 		} else {
-			logger.Info("proposed blocks are not divergent from written block")
+			// the written block is part of the createBlocks stack; nothing to be done
 		}
 	default:
-		// no proposed blocks
-		bw.lastProposedBlock = block
-		logger.Info("updated proposed block:", block)
+		// no created blocks; set this block as the last created block
+		updateLastCreatedBlock()
 	}
 
 	go func() {

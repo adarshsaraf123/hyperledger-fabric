@@ -44,13 +44,18 @@ func (mbws mockBlockWriterSupport) CreateBundle(channelID string, config *cb.Con
 	return nil, nil
 }
 
+func (mbws mockBlockWriterSupport) ChainID() string {
+	return genesisconfig.TestChainID
+}
+
 func TestCreateBlock(t *testing.T) {
 	seedBlock := cb.NewBlock(7, []byte("lasthash"))
 	seedBlock.Data.Data = [][]byte{[]byte("somebytes")}
 
 	bw := &BlockWriter{
-		lastProposedBlock: seedBlock,
-		proposedBlocks:    make(chan *cb.Block, 10),
+		lastCreatedBlock: seedBlock,
+		createdBlocks:    make(chan *cb.Block, 10),
+		support:          &mockBlockWriterSupport{},
 	}
 	block := bw.CreateNextBlock([]*cb.Envelope{
 		{Payload: []byte("some other bytes")},
@@ -199,7 +204,7 @@ func TestGoodWriteConfig(t *testing.T) {
 	assert.Equal(t, consenterMetadata, omd.Value)
 }
 
-func TestValidProposeBlocksQueue(t *testing.T) {
+func TestValidCreatedBlocksQueue(t *testing.T) {
 	logger.Info("testing propose blocks")
 	l := NewRAMLedger(10)
 
@@ -209,7 +214,7 @@ func TestValidProposeBlocksQueue(t *testing.T) {
 			ReadWriter:  l,
 			Validator:   &mockconfigtx.Validator{},
 		},
-		proposedBlocks: make(chan *cb.Block, 10),
+		createdBlocks: make(chan *cb.Block, 10),
 	}
 
 	ctx := makeConfigTx(genesisconfig.TestChainID, 1)
@@ -222,11 +227,11 @@ func TestValidProposeBlocksQueue(t *testing.T) {
 	bw.committingBlock.Lock()
 	bw.committingBlock.Unlock()
 
-	t.Run("succesfully propose blocks decoupling CreateNextBlock from WriteBlock", func(t *testing.T) {
+	t.Run("propose multiple blocks without having to write them out; decouples CreateNextBlock from WriteBlock ", func(t *testing.T) {
 		// Scenario:
 		//   We create five blocks initially and then write only two of them. We further create five more blocks
 		//   and write out the remaining 8 blocks in the propose stack. This should succeed since the written
-		//   blocks are not divergent from the proposed blocks.
+		//   blocks are not divergent from the created blocks.
 		assert.NotPanics(t, func() {
 			blocks := []*cb.Block{}
 			// Create five blocks without writing them out
@@ -251,14 +256,15 @@ func TestValidProposeBlocksQueue(t *testing.T) {
 		})
 	})
 
-	t.Run("proposed blocks should always be over written blocks", func(t *testing.T) {
+	t.Run("created blocks should always be over written blocks", func(t *testing.T) {
 		// Scenario:
 		//   We will create
-		//     1. a propose stack with 5 blocks over baseLastProposedBlock, and
-		//     2. an alternate block over baseLastProposedBlock.
-		//   We will write out this alternate block and verify the subsequent block is created over this alternate block.
+		//     1. a propose stack with 5 blocks over baseLastCreatedBlock, and
+		//     2. an alternate block over baseLastCreatedBlock.
+		//   We will write out this alternate block and verify that the subsequent block is created over this alternate block
+		//   and not on the existing propose stack.
 
-		baseLastProposedBlock := bw.lastProposedBlock
+		baseLastCreatedBlock := bw.lastCreatedBlock
 
 		// Create the stack of five blocks without writing them out
 		chain := []*cb.Block{}
@@ -267,16 +273,8 @@ func TestValidProposeBlocksQueue(t *testing.T) {
 		}
 
 		// create and write out the alternate block
-		alternateBlock := createBlockOverSpecifiedBlock(baseLastProposedBlock, []*cb.Envelope{{Payload: []byte("alternate test envelope")}})
+		alternateBlock := createBlockOverSpecifiedBlock(baseLastCreatedBlock, []*cb.Envelope{{Payload: []byte("alternate test envelope")}})
 		bw.WriteBlock(alternateBlock, nil)
-
-		// TODO: the current challenge is that WriteBlock does not panic; instead commitBlock launched as a goroutine
-		// 	 by WriteBlock panics. Need to figure out how to test this commitBlock panic
-		// writing blocks from the alternate stack should panic
-		// assert.Panics(t, func() {
-		// 	bw.WriteBlock(chain[0], nil) // should panic since this was not the expected block number
-		// 	bw.WriteBlock(chain[1], nil) // should panic since the previous block hash will not match
-		// })
 
 		// assert that CreateNextBlock creates the next block over this alternateBlock
 		createdBlockOverAlternateBlock := bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}})
@@ -285,6 +283,28 @@ func TestValidProposeBlocksQueue(t *testing.T) {
 			bytes.Equal(createdBlockOverAlternateBlock.Header.Bytes(), synthesizedBlockOverAlternateBlock.Header.Bytes()),
 			"created and synthesized blocks should be equal",
 		)
+		bw.WriteBlock(createdBlockOverAlternateBlock, nil)
+	})
+
+	t.Run("allow parallel goroutines to call CreateNextBlock", func(t *testing.T) {
+		// Scenario:
+		//   We create five blocks initially and then write only two of them. We further create five more blocks
+		//   and write out the remaining 8 blocks in the propose stack. This should succeed since the written
+		//   blocks are not divergent from the created blocks.
+		assert.NotPanics(t, func() {
+			blocks := []*cb.Block{}
+			for i := 0; i < 10; i++ {
+				go func() {
+					blocks = append(blocks, bw.CreateNextBlock([]*cb.Envelope{{Payload: []byte("test envelope")}}))
+				}()
+			}
+
+			// sort the blocks by block number since the goroutines could have been executed in any order
+			// sort.Slice(blocks, func(i, j int) bool { return blocks[i].Header.Number < blocks[j].Header.Number })
+			for i := 0; i < 9; i++ {
+				assert.Equal(t, blocks[i].Header.Number+1, blocks[i+1].Header.Number)
+			}
+		})
 	})
 }
 
