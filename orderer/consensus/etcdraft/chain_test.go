@@ -646,7 +646,7 @@ var _ = Describe("Chain", func() {
 					Eventually(c3.support.WriteBlockCallCount).Should(Equal(2))
 				})
 
-				It("purges blockcutter and stops timer if leadership is lost", func() {
+				It("purges blockcutter, stops timer and discards created blocks if leadership is lost", func() {
 					// enqueue one transaction into 1's blockcutter
 					err := c1.Order(env, 0)
 					Expect(err).ToNot(HaveOccurred())
@@ -659,9 +659,10 @@ var _ = Describe("Chain", func() {
 					// 1 steps down upon reconnect
 					c2.clock.Increment(interval)                             // trigger a heartbeat msg being sent from 2 to 1
 					Eventually(c1.observe).Should(Receive(Equal(uint64(2)))) // leader change
-					Expect(c1.clock.WatcherCount()).To(Equal(1))             // timer should be stopped
 
-					Eventually(c1.cutter.CurBatch).Should(HaveLen(0))
+					Eventually(c1.cutter.CurBatch).Should(HaveLen(0)) // CurBatch should have been reset
+					Expect(c1.clock.WatcherCount()).To(Equal(1))      // timer should be stopped
+					Expect(c1.support.DiscardCreatedBlocksCallCount()).Should(Equal(1))
 
 					network.disconnect(2)
 					n := network.elect(1)

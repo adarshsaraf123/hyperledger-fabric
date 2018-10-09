@@ -151,7 +151,8 @@ func (c *Chain) Start() {
 	close(c.startC)
 
 	go c.serveRaft()
-	go c.serveRequest()
+	go c.createBlocks()
+	go c.writeBlocks()
 }
 
 // Order submits normal type transactions for ordering.
@@ -272,7 +273,7 @@ func (c *Chain) Step(req *orderer.StepRequest, sender uint64) error {
 }
 
 // Submit forwards the incoming request to:
-// - the local serveRequest goroutine if this is leader
+// - the local createBlocks goroutine if this is leader
 // - the actual leader via the transport mechanism
 // The call fails if there's no leader elected yet.
 func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
@@ -299,7 +300,7 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 	return c.rpc.SendSubmit(lead, req)
 }
 
-func (c *Chain) serveRequest() {
+func (c *Chain) createBlocks() {
 	ticking := false
 	timer := c.clock.NewTimer(time.Second)
 	// we need a stopped timer rather than nil,
@@ -342,13 +343,6 @@ func (c *Chain) serveRequest() {
 				c.logger.Errorf("Failed to commit block: %s", err)
 			}
 
-		case b := <-c.commitC:
-			c.writeBlock(b)
-
-		case <-c.resignC:
-			_ = c.support.BlockCutter().Cut()
-			stop()
-
 		case <-timer.C():
 			ticking = false
 
@@ -363,20 +357,16 @@ func (c *Chain) serveRequest() {
 				c.logger.Errorf("Failed to commit block: %s", err)
 			}
 
+		case <-c.resignC:
+			_ = c.support.BlockCutter().Cut()
+			c.support.DiscardCreatedBlocks()
+			stop()
+
 		case <-c.doneC:
-			c.logger.Infof("Stop serving requests")
+			c.logger.Infof("Stop creating blocks")
 			return
 		}
 	}
-}
-
-func (c *Chain) writeBlock(b *common.Block) {
-	if utils.IsConfigBlock(b) {
-		c.support.WriteConfigBlock(b, nil)
-		return
-	}
-
-	c.support.WriteBlock(b, nil)
 }
 
 // Orders the envelope in the `msg` content. SubmitRequest.
@@ -427,6 +417,12 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 			return errors.Errorf("failed to propose data to Raft node: %s", err)
 		}
 
+	}
+	return nil
+}
+
+func (c *Chain) writeBlocks() {
+	for {
 		select {
 		case block := <-c.commitC:
 			if utils.IsConfigBlock(block) {
@@ -435,15 +431,11 @@ func (c *Chain) commitBatches(batches ...[]*common.Envelope) error {
 				c.support.WriteBlock(block, nil)
 			}
 
-		case <-c.resignC:
-			return errors.Errorf("aborted block committing: lost leadership")
-
 		case <-c.doneC:
-			return nil
+			c.logger.Infof("Stop writing blocks")
+			return
 		}
 	}
-
-	return nil
 }
 
 func (c *Chain) serveRaft() {
