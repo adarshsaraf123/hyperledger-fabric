@@ -87,6 +87,7 @@ type Options struct {
 	MaxInflightMsgs int
 
 	RaftMetadata *etcdraft.RaftMetadata
+	Metrics      *Metrics
 }
 
 type submit struct {
@@ -144,7 +145,8 @@ type Chain struct {
 	node *node
 	opts Options
 
-	logger *flogging.FabricLogger
+	Metrics *Metrics
+	logger  *flogging.FabricLogger
 }
 
 // NewChain constructs a chain object.
@@ -197,6 +199,7 @@ func NewChain(
 		lastSnapBlockNum: snapBlkNum,
 		createPuller:     f,
 		clock:            opts.Clock,
+		Metrics:          opts.Metrics,
 		logger:           lg,
 		opts:             opts,
 	}
@@ -237,6 +240,11 @@ func NewChain(
 func (c *Chain) Start() {
 	c.logger.Infof("Starting Raft node")
 
+	c.Metrics.NodeID.With("channel", c.channelID).Set(float64(c.raftID))
+	c.raftMetadataLock.RLock()
+	c.Metrics.ClusterSize.With("channel", c.channelID).Set(float64(len(c.opts.RaftMetadata.Consenters)))
+	c.raftMetadataLock.RUnlock()
+
 	if err := c.configureComm(); err != nil {
 		c.logger.Errorf("Failed to start chain, aborting: +%v", err)
 		close(c.doneC)
@@ -253,15 +261,24 @@ func (c *Chain) Start() {
 
 // Order submits normal type transactions for ordering.
 func (c *Chain) Order(env *common.Envelope, configSeq uint64) error {
-	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
+	var err error
+	if err = c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0); err != nil {
+		c.Metrics.ProposalFailures.With("channel", c.channelID).Add(1)
+	}
+	return err
 }
 
 // Configure submits config type transactions for ordering.
 func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
-	if err := c.checkConfigUpdateValidity(env); err != nil {
+	var err error
+	if err = c.checkConfigUpdateValidity(env); err != nil {
+		c.Metrics.ProposalFailures.With("channel", c.channelID).Add(1)
 		return err
 	}
-	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
+	if err = c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0); err != nil {
+		c.Metrics.ProposalFailures.With("channel", c.channelID).Add(1)
+	}
+	return err
 }
 
 // Validate the config update for being of Type A or Type B as described in the design doc.
@@ -503,6 +520,8 @@ func (c *Chain) serveRequest() {
 				newLeader := atomic.LoadUint64(&app.soft.Lead) // etcdraft requires atomic access
 				if newLeader != soft.Lead {
 					c.logger.Infof("Raft leader changed: %d -> %d", soft.Lead, newLeader)
+					c.Metrics.LeaderChanges.With("channel", c.channelID).Add(1)
+					c.Metrics.LeaderID.With("channel", c.channelID).Set(float64(newLeader))
 
 					if newLeader == c.raftID {
 						becomeLeader()
@@ -764,6 +783,10 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 
 				c.confChangeInProgress = nil
 				c.configInflight = false
+				// report the new cluster size
+				c.raftMetadataLock.RLock()
+				c.Metrics.ClusterSize.With("channel", c.channelID).Set(float64(len(c.opts.RaftMetadata.Consenters)))
+				c.raftMetadataLock.RUnlock()
 			}
 
 			if cc.Type == raftpb.ConfChangeRemoveNode && cc.NodeID == c.raftID {
@@ -803,6 +826,8 @@ func (c *Chain) gc() {
 		select {
 		case g := <-c.gcC:
 			c.node.takeSnapshot(g.index, g.state, g.data)
+			c.Metrics.SnapshotBlockNumber.With("channel", c.channelID).Set(float64(c.lastSnapBlockNum))
+			c.Metrics.SnapshotIndex.With("channel", c.channelID).Set(float64(g.index))
 		case <-c.doneC:
 			c.logger.Infof("Stop garbage collecting")
 			return
