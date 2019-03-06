@@ -57,6 +57,22 @@ var (
 		LabelNames:   []string{"channel"},
 		StatsdFormat: "%{#fqname}.%{channel}",
 	}
+	dataPersistDurationOpts = metrics.HistogramOpts{
+		Namespace:    "consensus",
+		Subsystem:    "etcdraft",
+		Name:         "data_persist_duration",
+		Help:         "The time taken for etcd/raft data to be persisted in storage.",
+		LabelNames:   []string{"channel"},
+		StatsdFormat: "%{#fqname}.%{channel}",
+	}
+	proposalsReceivedOpts = metrics.CounterOpts{
+		Namespace:    "consensus",
+		Subsystem:    "etcdraft",
+		Name:         "proposals_received",
+		Help:         "The total number of proposals received.",
+		LabelNames:   []string{"channel"},
+		StatsdFormat: "%{#fqname}.%{channel}",
+	}
 )
 
 type Metrics struct {
@@ -66,6 +82,8 @@ type Metrics struct {
 	SnapshotBlockNumber  metrics.Gauge
 	LeaderChanges        metrics.Counter
 	ProposalFailures     metrics.Counter
+	DataPersistDuration  metrics.Histogram
+	ProposalsReceived    metrics.Counter
 }
 
 func NewMetrics(p metrics.Provider) *Metrics {
@@ -76,5 +94,7 @@ func NewMetrics(p metrics.Provider) *Metrics {
 		SnapshotBlockNumber:  p.NewGauge(snapshotBlockNumberOpts),
 		LeaderChanges:        p.NewCounter(leaderChangesOpts),
 		ProposalFailures:     p.NewCounter(proposalFailuresOpts),
+		DataPersistDuration:  p.NewHistogram(dataPersistDurationOpts),
+		ProposalsReceived:    p.NewCounter(proposalsReceivedOpts),
 	}
 }

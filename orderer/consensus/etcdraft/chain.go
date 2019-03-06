@@ -250,6 +250,8 @@ func NewChain(
 			SnapshotBlockNumber:  opts.Metrics.SnapshotBlockNumber.With("channel", support.ChainID()),
 			LeaderChanges:        opts.Metrics.LeaderChanges.With("channel", support.ChainID()),
 			ProposalFailures:     opts.Metrics.ProposalFailures.With("channel", support.ChainID()),
+			DataPersistDuration:  opts.Metrics.DataPersistDuration.With("channel", support.ChainID()),
+			ProposalsReceived:    opts.Metrics.ProposalsReceived.With("channel", support.ChainID()),
 		},
 		logger:          lg,
 		opts:            opts,
@@ -277,6 +279,7 @@ func NewChain(
 		chainID:      c.channelID,
 		chain:        c,
 		logger:       c.logger,
+		metrics:      c.Metrics,
 		storage:      storage,
 		rpc:          c.rpc,
 		config:       config,
@@ -370,11 +373,13 @@ func (c *Chain) detectMigration() bool {
 
 // Order submits normal type transactions for ordering.
 func (c *Chain) Order(env *common.Envelope, configSeq uint64) error {
+	c.Metrics.ProposalsReceived.Add(1)
 	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
 }
 
 // Configure submits config type transactions for ordering.
 func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
+	c.Metrics.ProposalsReceived.Add(1)
 	if err := c.checkConfigUpdateValidity(env); err != nil {
 		c.Metrics.ProposalFailures.Add(1)
 		return err
