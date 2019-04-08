@@ -42,17 +42,17 @@ func NewSystemChannel(support StandardChannelSupport, templator ChannelConfigTem
 }
 
 // CreateSystemChannelFilters creates the set of filters for the ordering system chain.
-func CreateSystemChannelFilters(chainCreator ChainCreator, ledgerResources channelconfig.Resources) *RuleSet {
-	ordererConfig, ok := ledgerResources.OrdererConfig()
+func CreateSystemChannelFilters(chainCreator ChainCreator, configResources channelconfig.Resources) *RuleSet {
+	ordererConfig, ok := configResources.OrdererConfig()
 	if !ok {
 		logger.Panicf("Cannot create system channel filters without orderer config")
 	}
 	return NewRuleSet([]Rule{
 		EmptyRejectRule,
-		NewExpirationRejectRule(ledgerResources),
+		NewExpirationRejectRule(configResources),
 		NewSizeFilter(ordererConfig),
-		NewSigFilter(policies.ChannelWriters, ledgerResources),
-		NewSystemChannelFilter(ledgerResources, chainCreator),
+		NewSigFilter(policies.ChannelWriters, configResources),
+		NewSystemChannelFilter(configResources, chainCreator),
 	})
 }
 
