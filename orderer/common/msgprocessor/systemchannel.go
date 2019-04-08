@@ -42,7 +42,9 @@ func NewSystemChannel(support StandardChannelSupport, templator ChannelConfigTem
 }
 
 // CreateSystemChannelFilters creates the set of filters for the ordering system chain.
-func CreateSystemChannelFilters(chainCreator ChainCreator, configResources channelconfig.Resources) *RuleSet {
+func CreateSystemChannelFilters(chainCreator ChainCreator,
+	configResources channelconfig.Resources,
+	validator multichannel.ConsensusMetdataValidator) *RuleSet {
 	ordererConfig, ok := configResources.OrdererConfig()
 	if !ok {
 		logger.Panicf("Cannot create system channel filters without orderer config")
@@ -52,7 +54,7 @@ func CreateSystemChannelFilters(chainCreator ChainCreator, configResources chann
 		NewExpirationRejectRule(configResources),
 		NewSizeFilter(ordererConfig),
 		NewSigFilter(policies.ChannelWriters, configResources),
-		NewSystemChannelFilter(configResources, chainCreator),
+		NewSystemChannelFilter(configResources, chainCreator, validator),
 	})
 }
 

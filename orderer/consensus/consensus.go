@@ -25,6 +25,12 @@ type Consenter interface {
 	// the last block committed to the ledger of this Chain.  For a new chain, this metadata will be
 	// nil, as this field is not set on the genesis block
 	HandleChain(support ConsenterSupport, metadata *cb.Metadata) (Chain, error)
+
+	// ValidateConsensusMetadata determines the validity of a
+	// ConsensusMetadata update during config updates on the channel.
+	// Since the ConsensusMetadata is specific to the consensus implementation (independent of the particular
+	// chain) this validation also needs to be implemented by the specific consensus implementation.
+	ValidateConsensusMetadata(oldMetadata, newMetadata []byte, newChannel bool) error
 }
 
 // Chain defines a way to inject messages for ordering.

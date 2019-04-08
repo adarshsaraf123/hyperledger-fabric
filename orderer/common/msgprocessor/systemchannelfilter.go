@@ -9,6 +9,7 @@ package msgprocessor
 import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/channelconfig"
+	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
@@ -33,15 +34,17 @@ type LimitedSupport interface {
 
 // SystemChainFilter implements the filter.Rule interface.
 type SystemChainFilter struct {
-	cc      ChainCreator
-	support LimitedSupport
+	cc        ChainCreator
+	support   LimitedSupport
+	validator multichannel.ConsensusMetadataValidator
 }
 
 // NewSystemChannelFilter returns a new instance of a *SystemChainFilter.
-func NewSystemChannelFilter(ls LimitedSupport, cc ChainCreator) *SystemChainFilter {
+func NewSystemChannelFilter(ls LimitedSupport, cc ChainCreator, validator multichannel.ConsensusMetadataValidator) *SystemChainFilter {
 	return &SystemChainFilter{
-		support: ls,
-		cc:      cc,
+		support:   ls,
+		cc:        cc,
+		validator: validator,
 	}
 }
 
@@ -147,6 +150,17 @@ func (scf *SystemChainFilter) authorizeAndInspect(configTx *cb.Envelope) error {
 	oc, ok := bundle.OrdererConfig()
 	if !ok {
 		return errors.New("config is missing orderer group")
+	}
+	newMetadata := oc.ConsensusMetadata()
+
+	oldOrdererConfig, ok := scf.support.OrdererConfig()
+	if !ok {
+		return errors.New("old config is missing orderer group")
+	}
+	oldMetadata := oldOrdererConfig.ConsensusMetadata()
+
+	if err = scf.validator.ValidateConsensusMetadata(oldMetadata, newMetadata, true); err != nil {
+		return errors.Wrap(err, "consensus metadata update is invalid")
 	}
 
 	if err = oc.Capabilities().Supported(); err != nil {

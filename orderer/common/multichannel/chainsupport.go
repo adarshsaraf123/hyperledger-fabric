@@ -20,6 +20,20 @@ import (
 	"github.com/pkg/errors"
 )
 
+// ConsensusMetdataValidator supports the validation of updates to ConsensusMetadata during
+// config updates to the channel.
+// TODO: This note does not belong here since this is not something we want to appear in docs.
+// NOTE: It makes sense to add this to the ChainSupport since the design of Registrar does not assume
+// that there is a single consensus type at this orderer node and therefore the resolution of
+// the consensus type too happens only at the ChainSupport level.
+type ConsensusMetdataValidator interface {
+	// ValidateConsensusMetadata determines the validity of a
+	// ConsensusMetadata update during config updates on the channel.
+	// Since the ConsensusMetadata is specific to the consensus implementation (independent of the particular
+	// chain) this validation also needs to be implemented by the specific consensus implementation.
+	ValidateConsensusMetadata(oldMetadata, newMetadata []byte, newChannel bool) error
+}
+
 // ChainSupport holds the resources for a particular channel.
 type ChainSupport struct {
 	*ledgerResources
@@ -28,6 +42,7 @@ type ChainSupport struct {
 	consensus.Chain
 	cutter blockcutter.Receiver
 	identity.SignerSerializer
+	ConsensusMetdataValidator
 	// Needed for consensus-type migration: to execute the migration state machine correctly,
 	// chains need to know if they are system or standard channel.
 	systemChannel bool
@@ -88,6 +103,7 @@ func newChainSupport(
 	if err != nil {
 		logger.Panicf("[channel: %s] Error creating consenter: %s", cs.ChainID(), err)
 	}
+	cs.ConsensusMetdataValidator = consenter
 
 	logger.Debugf("[channel: %s] Done creating channel support resources", cs.ChainID())
 
@@ -189,7 +205,27 @@ func (cs *ChainSupport) ProposeConfigUpdate(configtx *cb.Envelope) (*cb.ConfigEn
 		return nil, errors.Wrap(err, "config update is not compatible")
 	}
 
-	return env, cs.ValidateNew(bundle)
+	if err = cs.ValidateNew(bundle); err != nil {
+		return nil, err
+	}
+
+	oldOrdererConfig, ok := cs.OrdererConfig()
+	if !ok {
+		return nil, errors.New("old config is missing orderer group")
+	}
+	oldMetadata := oldOrdererConfig.ConsensusMetadata()
+
+	// TODO can remove this check since this is being validated in checkResources earlier
+	newOrdererConfig, ok := bundle.OrdererConfig()
+	if !ok {
+		return nil, errors.New("new config is missing orderer group")
+	}
+	newMetadata := newOrdererConfig.ConsensusMetadata()
+
+	if err = cs.ValidateConsensusMetadata(oldMetadata, newMetadata, false); err != nil {
+		return nil, errors.Wrap(err, "consensus metadata update is invalid")
+	}
+	return env, nil
 }
 
 // ChainID passes through to the underlying configtx.Validator

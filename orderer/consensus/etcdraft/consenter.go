@@ -225,6 +225,14 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 	)
 }
 
+// ValidateConsensusMetadata determines the validity of a
+// ConsensusMetadata update during config updates on the channel.
+// Since the ConsensusMetadata is specific to the consensus implementation (independent of the particular
+// chain) this validation also needs to be implemented by the specific consensus implementation.
+func (c *Consenter) ValidateConsensusMetadata(oldMetadata, newMetadata []byte, newChannel bool) error {
+	return nil
+}
+
 // ReadBlockMetadata attempts to read raft metadata from block metadata, if available.
 // otherwise, it reads raft metadata from config metadata supplied.
 func ReadBlockMetadata(blockMetadata *common.Metadata, configMetadata *etcdraft.ConfigMetadata) (*etcdraft.BlockMetadata, error) {

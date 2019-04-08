@@ -45,6 +45,10 @@ func (solo *consenter) HandleChain(support consensus.ConsenterSupport, metadata 
 	return newChain(support), nil
 }
 
+func (solo *consenter) ValidateConsensusMetadata(oldMetadata, newMetadata []byte, newChannel bool) error {
+	return nil
+}
+
 func newChain(support consensus.ConsenterSupport) *chain {
 	return &chain{
 		support:         support,
